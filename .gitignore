@@ -16,3 +16,4 @@ dist/
 checkpoints/
 outputs/
 wandb/
+jobs/

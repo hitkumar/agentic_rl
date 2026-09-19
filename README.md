@@ -47,6 +47,36 @@ attention kernels for the target GPU and CPU architecture before adding them.
 Prime-RL defines its own CUDA indexes, wheel URLs, and dependency overrides, so
 its full dependency list needs review before reusing it in this project.
 
+## Harbor
+
+[Harbor](https://github.com/harbor-framework/harbor) is used to run agent
+benchmarks and inspect their results. Install it as a standalone tool:
+
+```bash
+uv tool install harbor
+harbor --version
+```
+
+Harbor uses Docker for local task environments. Check that Docker is running
+and accessible:
+
+```bash
+docker info
+```
+
+Run Harbor's hello-world task with its reference-solution agent:
+
+```bash
+harbor run -d harbor/hello-world -a oracle
+```
+
+The command writes its results to `jobs/`. Open Harbor's local results viewer
+with:
+
+```bash
+harbor view jobs
+```
+
 ## Development
 
 ```bash
