@@ -13,6 +13,7 @@ dist/
 .env.*
 !.env.example
 .ipynb_checkpoints/
+.cache/
 checkpoints/
 outputs/
 wandb/

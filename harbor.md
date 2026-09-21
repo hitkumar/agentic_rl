@@ -261,20 +261,141 @@ official Terminal-Bench 2.1 results.
 ### Laguna S 2.1
 
 Poolside publishes an [official DGX Spark recipe](https://huggingface.co/poolside/Laguna-S-2.1-NVFP4)
-for Laguna S 2.1 using:
+for Laguna S 2.1. We started the target model and its DFlash draft model with
+NVIDIA's vLLM container:
 
-- `poolside/Laguna-S-2.1-NVFP4`;
-- the `poolside/Laguna-S-2.1-DFlash-NVFP4` draft model;
-- vLLM with native NVFP4 kernels;
-- 262,144-token context;
-- `--gpu-memory-utilization 0.85`;
-- `--max-num-seqs 32`; and
-- seven speculative tokens per step.
+```bash
+docker run -d --name laguna-vllm --gpus all --ipc=host \
+  --ulimit memlock=-1 --ulimit stack=67108864 \
+  -p 127.0.0.1:8000:8000 \
+  -e CUTE_DSL_ARCH=sm_121a -e MAX_JOBS=4 \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -v "$HOME/.cache/vllm:/root/.cache/vllm" \
+  -v "$HOME/.cache/flashinfer:/root/.cache/flashinfer" \
+  nvcr.io/nvidia/vllm:26.08-py3 \
+  vllm serve poolside/Laguna-S-2.1-NVFP4 \
+  --served-model-name Laguna-S-2.1-NVFP4 \
+  --speculative-config '{"model":"poolside/Laguna-S-2.1-DFlash-NVFP4","num_speculative_tokens":7}' \
+  --enable-auto-tool-choice \
+  --tool-call-parser poolside_v1 \
+  --reasoning-parser poolside_v1 \
+  --default-chat-template-kwargs '{"enable_thinking":true}' \
+  --max-num-seqs 32 \
+  --max-model-len 49152 \
+  --gpu-memory-utilization 0.875 \
+  --host 0.0.0.0 --port 8000
+```
 
-The two checkpoints total approximately 73 GB. Poolside reports 600-800
-tokens/second for prefill, around 15 tokens/second for prose decode, and 22-24
-tokens/second for code decode on one DGX Spark. This makes it a good local model
-for capable benchmark baselines and trajectory generation.
+The target checkpoint occupies about 92.9 GiB and the draft checkpoint about
+2.1 GiB. With this configuration, vLLM reports room for 63,560 KV-cache tokens.
+The 49,152-token limit leaves enough memory to run both models, but it is lower
+than Laguna's advertised maximum context.
+
+Check that the server is ready with:
+
+```bash
+curl http://127.0.0.1:8000/v1/models
+```
+
+## Pool harness through Harbor
+
+Pool is Poolside's coding-agent harness. Harbor runs it through the Agent Client
+Protocol (ACP):
+
+```text
+Harbor -> Pool ACP process -> Laguna API -> Pool tool call -> task container
+```
+
+Pool decides which tools to call. Harbor creates the task container, launches
+Pool inside it, records the ACP event stream, and runs the task verifier when the
+agent finishes. The Harbor agent name is `acp:poolside`. Harbor downloads the
+matching Pool package from the ACP registry; it does not use a Pool process
+running directly on the host.
+
+The vLLM port is bound to host loopback for safety. A task container cannot
+reach the host through `127.0.0.1`, so we added a bridge that accepts connections
+only from Docker's private address range and forwards them to vLLM:
+
+```bash
+setsid -f socat \
+  TCP4-LISTEN:8001,bind=0.0.0.0,reuseaddr,fork,range=172.16.0.0/12 \
+  TCP4:127.0.0.1:8000
+pgrep -x socat | tail -n 1 > /tmp/laguna-vllm-proxy.pid
+```
+
+Pool reaches that bridge at `http://172.17.0.1:8001/v1`. To stop it later:
+
+```bash
+kill "$(cat /tmp/laguna-vllm-proxy.pid)"
+```
+
+We ran this Terminal-Bench 2.1 smoke test:
+
+```bash
+harbor run \
+  --dataset terminal-bench/terminal-bench-2-1 \
+  --include-task-name terminal-bench/write-compressor \
+  --agent acp:poolside \
+  --model Laguna-S-2.1-NVFP4 \
+  --agent-env POOLSIDE_STANDALONE_BASE_URL=http://172.17.0.1:8001/v1 \
+  --agent-env POOLSIDE_API_KEY=EMPTY \
+  --agent-env POOLSIDE_STANDALONE_MODEL=Laguna-S-2.1-NVFP4 \
+  --agent-env POOLSIDE_STANDALONE_CONTEXT_LENGTH=49152 \
+  --agent-kwarg auth_policy=disabled \
+  --n-tasks 1 \
+  --n-concurrent 1 \
+  --agent-timeout-multiplier 4 \
+  --force-build \
+  --job-name laguna-s21-pool-tbench21-smoke-05 \
+  --allow-agent-host 172.17.0.1 \
+  --yes
+```
+
+The less obvious options are:
+
+- `auth_policy=disabled` lets Pool use its tools without approval prompts.
+- `--agent-timeout-multiplier 4` raises this task's 900-second agent timeout to
+  3,600 seconds.
+- `--force-build` builds the task image locally. This was needed because the
+  prebuilt Terminal-Bench image is AMD64, while the DGX Spark is ARM64.
+- `--allow-agent-host 172.17.0.1` permits access to the local API bridge.
+
+The native build works for `write-compressor` because its Dockerfile can build
+on ARM64. Tasks whose Dockerfiles depend on an AMD64-only base image may still
+need QEMU. Our first attempt used the prebuilt AMD64 image; Pool's setup then
+failed when an x86 `uv` process tried to install Python under QEMU.
+
+### Smoke-run result
+
+The job was `laguna-s21-pool-tbench21-smoke-05`, and the trial was
+`write-compressor__ruFenw8`. Pool successfully:
+
+1. read `/app/decomp.c`;
+2. inspected `/app/data.txt`; and
+3. listed the files under `/app`.
+
+This proves that Harbor, ACP, Pool, Laguna, and task-container tools are wired
+together correctly. After those calls, Laguna spent the rest of the run
+reasoning about an arithmetic encoder without making another tool call. We
+cancelled it after about 15 minutes. It did not create `data.comp`, and the
+verifier did not run. Any displayed zero for this trial is therefore a cancelled
+run, not a benchmark score.
+
+The artifacts are under:
+
+```text
+jobs/laguna-s21-pool-tbench21-smoke-05/write-compressor__ruFenw8/
+```
+
+The useful files are:
+
+- `agent/acp.txt`: readable Pool transcript;
+- `agent/acp-events.jsonl`: raw streaming ACP events;
+- `agent/trajectory.json`: Harbor's normalized ATIF trajectory; and
+- `result.json`: trial status and verifier result.
+
+The `jobs/` directory and Pool's generated `.cache/acp-registry/` metadata are
+ignored by Git.
 
 Poolside's reported 70.2% Terminal-Bench 2.1 result is not a Terminus-2 result.
 They used Harbor with their own `pool` agent harness, a maximum of 500 steps,
@@ -303,4 +424,9 @@ speed makes it inefficient for repeated local agent rollouts.
 - Harbor captures detailed Terminus-2 trajectories.
 - The first Qwen Terminal-Bench smoke trial reached the agent loop but timed
   out during its third model response.
+- Laguna S 2.1 runs locally through vLLM with its DFlash draft model.
+- Harbor 0.23.0 launches Pool 1.0.16 through ACP and can execute its tools in a
+  native ARM64 Terminal-Bench task container.
+- The first Laguna/Pool smoke trial was cancelled after unproductive extended
+  reasoning, so it is an integration check rather than a model score.
 - No full benchmark score has been produced yet.
