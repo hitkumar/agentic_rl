@@ -77,6 +77,20 @@ with:
 harbor view jobs
 ```
 
+### Hugging Face trace export
+
+Convert Harbor's ATIF `trajectory.json` into the JSONL format used by the
+[Hugging Face Agent Traces viewer](https://huggingface.co/docs/hub/agent-traces):
+
+```bash
+uv run atif-to-hf-trace jobs/<job>/<trial>/agent/trajectory.json
+```
+
+The default output is `trajectory.hf.jsonl` beside the input file. Upload that
+file to a Hugging Face dataset or Storage Bucket to open the session timeline,
+messages, reasoning, tool calls, and tool results in the web viewer. Use `-o`
+to choose another output path and `--name` to set its display name.
+
 ## Development
 
 ```bash

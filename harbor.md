@@ -397,6 +397,120 @@ The useful files are:
 The `jobs/` directory and Pool's generated `.cache/acp-registry/` metadata are
 ignored by Git.
 
+### Cheaper Terminal-Bench tasks
+
+Poolside's published Terminal-Bench 2.1 trajectories include both `thinking`
+and `no-thinking` runs. Our Laguna server produced approximately 7.6-8.8 output
+tokens/second during the long `write-compressor` response. At that speed, the
+best candidates for a complete local run under ten minutes are:
+
+| Task | Poolside no-thinking passes | Average output tokens | Local estimate |
+| --- | ---: | ---: | ---: |
+| `log-summary-date-ranges` | 4/4 | 2,231 | 5-8 minutes |
+| `fix-git` | 4/4 | 2,210 | 5-8 minutes |
+| `prove-plus-comm` | 4/4 | 1,644 | 4-8 minutes after its image is cached |
+
+`log-summary-date-ranges` is the best first test. Its task image is a small
+Python image that builds natively on ARM64, and all four published no-thinking
+attempts passed. `fix-git` also has a simple native build. `prove-plus-comm`
+installs Coq, so its first Docker build may push the total past ten minutes.
+
+Thinking is more expensive. In Poolside's thinking trajectories,
+`log-summary-date-ranges` used a median of 5,066 output tokens. That is roughly
+ten minutes of decoding here before tool and verifier time.
+`kv-store-grpc` and `pypi-server` were the next cheapest reliable thinking
+tasks, but their median output counts were approximately 5,515 and 6,514 tokens,
+respectively. They will probably take 11-15 minutes locally.
+
+For the shorter validation runs, we restarted vLLM with thinking disabled:
+
+```bash
+--default-chat-template-kwargs '{"enable_thinking":false}'
+```
+
+A cold Docker pull or image build can still add several minutes; the estimates
+above are most useful after the base image is cached.
+
+Sources:
+
+- [Poolside Terminal-Bench 2.1 trajectories](https://trajectories.poolside.ai/?variant=no-thinking&sort=cost)
+- [Terminal-Bench 2 task definitions](https://github.com/harbor-framework/terminal-bench-2)
+
+### Completed no-thinking validation runs
+
+Use the Pool command above with the task selector and job name changed for each
+task. Both complete validation runs passed Harbor's verifier:
+
+| Task | Job | Reward | Runtime | Output tokens | Tool calls |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `log-summary-date-ranges` | `laguna-s21-pool-log-summary-no-thinking-01` | 1.0 | 7m | 2,846 | 10 |
+| `fix-git` | `laguna-s21-pool-fix-git-no-thinking-01` | 1.0 | 4m 37s | 2,133 | 21 |
+
+The `log-summary-date-ranges` agent wrote `/app/summary.csv` and produced the
+same counts as Poolside's published trajectories. It used nine `execute` calls
+and one `edit` call. Poolside publishes four successful no-thinking attempts for
+this task; our result is one successful local attempt.
+
+The `fix-git` agent found the dangling `Move to Stanford` commit in the reflog,
+merged it into `master`, resolved the conflict in `_includes/about.md`, and
+cleaned up its temporary branch. It used 18 `execute` calls, two `read` calls,
+and one `edit` call. Poolside also publishes four successful no-thinking
+attempts for this task.
+
+The local trials and ATIF trajectories are:
+
+```text
+jobs/laguna-s21-pool-log-summary-no-thinking-01/log-summary-date-ranges__pA57Rk3/
+jobs/laguna-s21-pool-fix-git-no-thinking-01/fix-git__TWiKuii/
+```
+
+These two passes validate the local vLLM service, Docker task environments,
+Harbor, the Pool ACP harness, tool execution, verifiers, and trajectory capture.
+They are task-level checks rather than an aggregate Terminal-Bench score.
+
+### Hugging Face trajectory viewer
+
+Harbor saves trajectories as ATIF JSON. The local `atif-to-hf-trace` command
+converts one into Hugging Face Session Traces JSONL:
+
+```bash
+uv run atif-to-hf-trace \
+  jobs/<job>/<trial>/agent/trajectory.json \
+  --name "Laguna S 2.1 - <task>"
+```
+
+The default output is `agent/trajectory.hf.jsonl`. It preserves messages,
+reasoning, tool calls, and matched tool results. Install and authenticate the
+Hugging Face CLI with:
+
+```bash
+uv tool install --upgrade huggingface_hub
+hf auth login
+```
+
+Upload a trace to the private dataset with:
+
+```bash
+hf upload htkumar/agentic-rl-traces \
+  jobs/<job>/<trial>/agent/trajectory.hf.jsonl \
+  <trace-name>.jsonl \
+  --type dataset \
+  --commit-message "Add Harbor trajectory"
+```
+
+The two converted traces are in the private
+[htkumar/agentic-rl-traces](https://huggingface.co/datasets/htkumar/agentic-rl-traces)
+dataset:
+
+- [Laguna S 2.1 log-summary-date-ranges](https://huggingface.co/datasets/htkumar/agentic-rl-traces/blob/main/laguna-s21-log-summary-date-ranges.jsonl)
+- [Laguna S 2.1 fix-git](https://huggingface.co/datasets/htkumar/agentic-rl-traces/blob/main/laguna-s21-fix-git.jsonl)
+
+Harbor's own local viewer continues to use the original ATIF files:
+
+```bash
+uv run harbor view jobs
+```
+
 Poolside's reported 70.2% Terminal-Bench 2.1 result is not a Terminus-2 result.
 They used Harbor with their own `pool` agent harness, a maximum of 500 steps,
 four attempts per task, and an internal sandbox service. They also patched some
@@ -424,9 +538,13 @@ speed makes it inefficient for repeated local agent rollouts.
 - Harbor captures detailed Terminus-2 trajectories.
 - The first Qwen Terminal-Bench smoke trial reached the agent loop but timed
   out during its third model response.
-- Laguna S 2.1 runs locally through vLLM with its DFlash draft model.
+- Laguna S 2.1 runs locally through vLLM with its DFlash draft model and
+  thinking disabled for shorter validation runs.
 - Harbor 0.23.0 launches Pool 1.0.16 through ACP and can execute its tools in a
   native ARM64 Terminal-Bench task container.
 - The first Laguna/Pool smoke trial was cancelled after unproductive extended
   reasoning, so it is an integration check rather than a model score.
-- No full benchmark score has been produced yet.
+- `log-summary-date-ranges` and `fix-git` both pass locally with reward 1.0.
+- ATIF trajectories can be converted to Hugging Face Session Traces JSONL and
+  uploaded to the private `htkumar/agentic-rl-traces` dataset.
+- No aggregate Terminal-Bench score has been produced yet.

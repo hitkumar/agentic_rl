@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
+[project.scripts]
+atif-to-hf-trace = "agentic_rl.atif_to_hf:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.4",
