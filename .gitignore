@@ -18,5 +18,4 @@ checkpoints/
 outputs/
 wandb/
 jobs/
-.poolside/
-opencode-local.json
+.poolside/settings.local.yaml
