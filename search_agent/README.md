@@ -34,4 +34,10 @@ Download the Harness-1 SEC data and prepare `search_agent/data/queries.parquet` 
 uv run python -u search_agent/prepare_data.py
 ```
 
+Build the BM25 search index `search_agent/data/index.sqlite3` used by the search tools in `search_agent/retrieval.py`:
+
+```bash
+uv run python -u search_agent/retrieval.py
+```
+
 Browse the prepared queries and their gold chunks in `search_agent/explore_data.ipynb` (run it on the Bento `default` kernel).
