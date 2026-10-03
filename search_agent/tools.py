@@ -14,10 +14,109 @@ The curated set is scored whether or not finish is called.
 """
 
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 from search_agent.retrieval import Index
 
 MAX_CURATED = 30
+
+_K = {"type": "integer", "description": "Number of results to return (1-25).", "default": 10}
+
+
+class ToolSpec(TypedDict):
+    name: str
+    description: str
+    parameters: dict
+
+
+# JSON-schema function specs for the SearchTools methods, in the common name/description/parameters shape.
+TOOL_SPECS: list[ToolSpec] = [
+    {
+        "name": "bm25_search",
+        "description": "Search the full corpus with BM25 lexical ranking.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A lexical search query; concise keywords usually work best.",
+                },
+                "k": _K,
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "grep_corpus",
+        "description": "Scan the full corpus with a bounded regular expression.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "A Python-style regular expression to find exact terms, phrases, or variants. "
+                    "Keep it short and targeted.",
+                },
+                "k": _K,
+                "case_sensitive": {
+                    "type": "boolean",
+                    "description": "Whether letter case must match exactly.",
+                    "default": False,
+                },
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
+        "name": "read_document",
+        "description": "Read a candidate document's title and text.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chunk_id": {
+                    "type": "string",
+                    "description": "A chunk ID previously returned by one of the search tools.",
+                }
+            },
+            "required": ["chunk_id"],
+        },
+    },
+    {
+        "name": "curate",
+        "description": "Add relevant documents to the curated set that is returned as your output.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chunk_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Chunk IDs to add. Must have been returned by a search tool earlier in this episode.",
+                }
+            },
+            "required": ["chunk_ids"],
+        },
+    },
+    {
+        "name": "drop_curated",
+        "description": "Remove documents from the curated set (e.g. redundant or off-topic ones).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "chunk_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Chunk IDs to remove from the curated set.",
+                }
+            },
+            "required": ["chunk_ids"],
+        },
+    },
+    {
+        "name": "finish",
+        "description": "End the search. The curated set is returned as the final evidence.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+]
 
 
 @dataclass

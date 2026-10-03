@@ -40,4 +40,12 @@ Build the BM25 search index `search_agent/data/index.sqlite3` used by the search
 uv run python -u search_agent/retrieval.py
 ```
 
-Browse the prepared queries and their gold chunks in `search_agent/explore_data.ipynb` (run it on the Bento `default` kernel).
+Serve gpt-oss-20b with vLLM on one GPU (ready in about 3.5 minutes), then run the agent on dev queries with `search_agent/trajectory.py`. Both need the `train` dependency group:
+
+```bash
+uv sync --locked --group train
+CUDA_VISIBLE_DEVICES=0 .venv/bin/vllm serve unsloth/gpt-oss-20b-BF16 --dtype bfloat16 --max-model-len 65536 --gpu-memory-utilization 0.85 --port 8000
+uv run python -u -m search_agent.trajectory --limit 8
+```
+
+Put exploration notebooks in `search_agent/notebooks/`; the folder is gitignored, so they stay local.

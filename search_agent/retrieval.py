@@ -65,19 +65,21 @@ class Index:
         self.db = sqlite3.connect(f"file:{data_dir / 'index.sqlite3'}?mode=ro", uri=True, check_same_thread=False)
 
     def bm25_search(self, query: str, k: int = 10) -> list[dict]:
+        k = clamp_k(k)
         tokens = tokenize(query)
         if not tokens:
             return []
         # OR, not FTS5's default AND: a long query rarely has every word in one chunk.
         match = " OR ".join(f'"{token}"' for token in dict.fromkeys(tokens))
         hits = []
-        for chunk_id in self._rank(match, min(k, MAX_K)):
+        for chunk_id in self._rank(match, k):
             title, body = split_header(self._text(chunk_id))
             positions = [p for p in (body.lower().find(token) for token in tokens) if p >= 0]
             hits.append({"chunk_id": chunk_id, "title": title, "snippet": window(body, min(positions, default=0))})
         return hits
 
     def grep_corpus(self, pattern: str, k: int = 10, case_sensitive: bool = False) -> list[dict]:
+        k = clamp_k(k)
         if len(pattern) > MAX_PATTERN_CHARS:
             raise ValueError(f"pattern must be at most {MAX_PATTERN_CHARS} characters")
         try:
@@ -102,7 +104,7 @@ class Index:
             if found:
                 title, _ = split_header(text)
                 hits.append({"chunk_id": chunk_id, "title": title, "snippet": window(text, found.start())})
-                if len(hits) == min(k, MAX_K):
+                if len(hits) == k:
                     break
         return hits
 
@@ -120,6 +122,11 @@ class Index:
 
     def _text(self, chunk_id: str) -> str:
         return self.db.execute("SELECT text FROM chunks WHERE chunk_id = ?", (chunk_id,)).fetchone()[0]
+
+
+def clamp_k(k: int) -> int:
+    # SQLite reads a negative LIMIT as no limit.
+    return min(max(k, 1), MAX_K)
 
 
 def split_header(text: str) -> tuple[str, str]:

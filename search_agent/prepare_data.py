@@ -67,7 +67,7 @@ def family_groups(rows: list[dict]) -> dict[str, str]:
             family = parent[family]
         return family
 
-    chunk_owner = {}
+    chunk_owner: dict[str, str] = {}
     for row in rows:
         for chunk_id in gold_ids([row]):
             parent[find(row["family_id"])] = find(chunk_owner.setdefault(chunk_id, row["family_id"]))
