@@ -20,3 +20,4 @@ wandb/
 jobs/
 .poolside/settings.local.yaml
 search_agent/data/
+/search_agent/notebooks/
