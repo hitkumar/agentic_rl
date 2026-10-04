@@ -13,12 +13,17 @@ curated set is scored either way.
 
 Run the dev queries against a vLLM server (see search_agent/README.md to start one):
   uv run python -u -m search_agent.trajectory --limit 8
+
+Jasper's blog table (initial explorations: 4 trials on each of the 32 eval queries, scored by F1):
+  uv run python -u -m search_agent.trajectory --limit 32 --samples 4 --output rollouts.jsonl
 """
 
 import argparse
 import asyncio
 import json
+from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 import httpx
@@ -40,11 +45,12 @@ from openai_harmony import (
 
 from search_agent.prompts import SYSTEM_PROMPT
 from search_agent.retrieval import DATA_DIR, Index
-from search_agent.rewards import reward
+from search_agent.rewards import Score, reward, score
 from search_agent.tools import TOOL_SPECS, SearchTools, Session
 
 MAX_TURNS = 40
-MAX_TRAJECTORY_TOKENS = 65_536
+# Prompt plus responses; the default for --context-length. The vLLM server's --max-model-len must be at least this.
+CONTEXT_LENGTH = 65_536
 MAX_GENERATION_TOKENS = 2_048
 
 TOOLS = [ToolDescription.new(**spec) for spec in TOOL_SPECS]
@@ -137,12 +143,14 @@ def run_tool(tools: SearchTools, recipient: str, arguments: str) -> dict:
         return {"error": f"Bad arguments for {name}: {exc}"}
 
 
-async def run_trajectory(sampler: Sampler, index: Index, query: str, facts: list[dict]) -> Trajectory:
+async def run_trajectory(
+    sampler: Sampler, index: Index, query: str, facts: list[dict], context_length: int = CONTEXT_LENGTH
+) -> Trajectory:
     trajectory = Trajectory(prompt_ids=render_prompt(query))
     tools = SearchTools(index, trajectory.session)
     while trajectory.turns < MAX_TURNS:
         max_tokens = min(
-            MAX_GENERATION_TOKENS, MAX_TRAJECTORY_TOKENS - len(trajectory.prompt_ids) - len(trajectory.response_ids)
+            MAX_GENERATION_TOKENS, context_length - len(trajectory.prompt_ids) - len(trajectory.response_ids)
         )
         if max_tokens <= 0:
             trajectory.stop_reason = "context_full"
@@ -185,12 +193,77 @@ async def run_trajectory(sampler: Sampler, index: Index, query: str, facts: list
     return trajectory
 
 
+@dataclass
+class Rollout:
+    query_id: str
+    trial: int  # 1-based
+    trajectory: Trajectory
+    f1: Score  # beta=1, the eval metric
+
+
+def report(rollouts: list[Rollout]) -> None:
+    """Print per-query F1 and the summary rows of Jasper's blog table: best-of-N F1/precision/recall and trial-1 F1.
+
+    Best-of-N takes each metric's maximum over a query's trials independently, as in Jasper's evaluate.py.
+    """
+    by_query: dict[str, list[Rollout]] = {}
+    for rollout in rollouts:
+        by_query.setdefault(rollout.query_id, []).append(rollout)
+    groups = list(by_query.values())
+
+    def mean(values) -> float:
+        values = list(values)
+        return sum(values) / len(values)
+
+    def best(metric: str) -> float:
+        return mean(max(getattr(r.f1, metric) for r in group) for group in groups)
+
+    print(f"\n{'query':<8} best_f1 trial1_f1  per-trial f1")
+    for query_id, group in by_query.items():
+        f1s = [r.f1.f_beta for r in group]
+        print(f"{query_id:<8} {max(f1s):7.3f} {f1s[0]:9.3f}  " + " ".join(f"{f1:.3f}" for f1 in f1s))
+    print(
+        f"\nbest-of-{len(groups[0])}: f1={best('f_beta'):.3f} precision={best('precision'):.3f} "
+        f"recall={best('recall'):.3f}"
+    )
+    print(f"trial 1: f1={mean(group[0].f1.f_beta for group in groups):.3f}")
+    print(
+        f"all {len(rollouts)} rollouts: f1={mean(r.f1.f_beta for r in rollouts):.3f} "
+        f"precision={mean(r.f1.precision for r in rollouts):.3f} recall={mean(r.f1.recall for r in rollouts):.3f} "
+        f"reward={mean(r.trajectory.reward for r in rollouts):.3f} turns={mean(r.trajectory.turns for r in rollouts):.1f}"
+    )
+    print(f"stop reasons: {dict(Counter(r.trajectory.stop_reason for r in rollouts).most_common())}")
+    never = sum(all(not r.trajectory.session.curated_ids for r in group) for group in groups)
+    print(f"queries with nothing curated in any trial: {never}/{len(groups)}")
+
+
+def write_rollouts(rollouts: list[Rollout], path: Path) -> None:
+    with path.open("w") as f:
+        for r in rollouts:
+            record = {
+                "query_id": r.query_id,
+                "trial": r.trial,
+                "f1": r.f1.f_beta,
+                "precision": r.f1.precision,
+                "recall": r.f1.recall,
+                "reward": r.trajectory.reward,
+                "stop_reason": r.trajectory.stop_reason,
+                "turns": r.trajectory.turns,
+                "curated_ids": r.trajectory.session.curated_ids,
+                "transcript": ENCODING.decode(r.trajectory.response_ids),
+            }
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--server", default="http://localhost:8000")
     parser.add_argument("--model", default="unsloth/gpt-oss-20b-BF16")
     parser.add_argument("--split", default="dev")
     parser.add_argument("--limit", type=int, default=8, help="number of queries to run, concurrently")
+    parser.add_argument("--samples", type=int, default=1, help="trajectories per query")
+    parser.add_argument("--context-length", type=int, default=CONTEXT_LENGTH, help="token cap on prompt plus responses")
+    parser.add_argument("--output", type=Path, help="write every rollout, with its decoded transcript, as JSONL")
     args = parser.parse_args()
 
     queries = pd.read_parquet(DATA_DIR / "queries.parquet")
@@ -199,18 +272,25 @@ async def main() -> None:
     async with httpx.AsyncClient(base_url=args.server, timeout=None) as client:
         sampler = VLLMSampler(client, args.model)
 
-        async def run(row) -> Trajectory:
-            trajectory = await run_trajectory(sampler, index, row.query, json.loads(row.facts))
+        async def run(row, trial: int) -> Rollout:
+            facts = json.loads(row.facts)
+            trajectory = await run_trajectory(sampler, index, row.query, facts, args.context_length)
+            f1 = score(trajectory.session.curated_ids, facts, beta=1.0)
             print(
-                f"{row.query_id}: reward={trajectory.reward:.3f} stop={trajectory.stop_reason} turns={trajectory.turns} "
-                f"curated={len(trajectory.session.curated_ids)} tokens={len(trajectory.response_ids)} "
-                f"sampled={sum(trajectory.loss_mask)}",
+                f"{row.query_id} trial {trial}: f1={f1.f_beta:.3f} p={f1.precision:.3f} r={f1.recall:.3f} "
+                f"reward={trajectory.reward:.3f} stop={trajectory.stop_reason} turns={trajectory.turns} "
+                f"curated={len(trajectory.session.curated_ids)} tokens={len(trajectory.response_ids)}",
                 flush=True,
             )
-            return trajectory
+            return Rollout(row.query_id, trial, trajectory, f1)
 
-        trajectories = await asyncio.gather(*(run(row) for row in queries.itertuples()))
-    print(f"mean reward over {len(trajectories)}: {sum(t.reward for t in trajectories) / len(trajectories):.3f}")
+        rollouts = await asyncio.gather(
+            *(run(row, trial) for row in queries.itertuples() for trial in range(1, args.samples + 1))
+        )
+    report(rollouts)
+    if args.output:
+        write_rollouts(rollouts, args.output)
+        print(f"wrote {len(rollouts)} rollouts to {args.output}")
 
 
 if __name__ == "__main__":
