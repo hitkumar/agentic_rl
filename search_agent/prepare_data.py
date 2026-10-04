@@ -19,8 +19,11 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import random
+import re
+import unicodedata
 from pathlib import Path
 
 import pyarrow as pa
@@ -74,15 +77,27 @@ def family_groups(rows: list[dict]) -> dict[str, str]:
     return {family: find(family) for family in parent}
 
 
-def split_queries(rows: list[dict], train_size: int, dev_size: int, seed: int) -> list[dict]:
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).casefold()).strip()
+
+
+def split_queries(rows: list[dict], available: set[str], train_size: int, dev_size: int, seed: int) -> list[dict]:
     """Pick at most one query per group, so train and dev share no family or gold chunk.
 
-    Dev is picked first. Within each split, 7-fact queries are picked first because they are rarest.
-    If train runs short of a fact count, the gap is filled with 5-fact, then 3-fact queries.
+    Reproduces Jasper's selection exactly (same seed, same queries): dev is picked first. Within each split, 7-fact
+    queries are picked first because they are rarest. Queries with gold chunks missing from `available`, or whose text
+    repeats an already picked query, are skipped after shuffling, so they still shift the shuffle as in his code. If
+    train runs short of a fact count, the gap is filled with 5-fact, then 3-fact queries. Returns the picked queries
+    sorted by split and query id, so the first N dev queries are his first N.
     """
     group = family_groups(rows)
+    # One query per family and fact count, in source order.
+    by_family: dict[str, dict[int, dict]] = {}
+    for row in rows:
+        by_family.setdefault(row["family_id"], {})[len(row["facts"])] = row
     rng = random.Random(seed)
     used_groups = set()
+    used_texts = set()
     selected = []
 
     def take(candidates: list[dict], count: int, split: str) -> int:
@@ -90,20 +105,24 @@ def split_queries(rows: list[dict], train_size: int, dev_size: int, seed: int) -
         for row in candidates:
             if taken == count:
                 break
-            if group[row["family_id"]] in used_groups:
+            text = normalize_text(row["query"])
+            if group[row["family_id"]] in used_groups or text in used_texts or not gold_ids([row]) <= available:
                 continue
             used_groups.add(group[row["family_id"]])
+            used_texts.add(text)
             selected.append({**row, "split": split})
             taken += 1
         return taken
 
     for split, size in (("dev", dev_size), ("train", train_size)):
-        quotas = {n: round(size * FACT_MIX[n]) for n in (7, 5)}
-        quotas[3] = size - quotas[7] - quotas[5]
+        # Round down, then hand the remainder to 3-, 5-, then 7-fact queries, one each.
+        quotas = {n: int(size * FACT_MIX[n]) for n in (7, 5, 3)}
+        for fact_count in (3, 5, 7)[: size - sum(quotas.values())]:
+            quotas[fact_count] += 1
         candidates = {}
         shortfall = 0
         for fact_count, quota in quotas.items():
-            candidates[fact_count] = [row for row in rows if len(row["facts"]) == fact_count]
+            candidates[fact_count] = [variants[fact_count] for variants in by_family.values() if fact_count in variants]
             rng.shuffle(candidates[fact_count])
             shortfall += quota - take(candidates[fact_count], quota, split)
         if shortfall and split == "dev":
@@ -112,7 +131,13 @@ def split_queries(rows: list[dict], train_size: int, dev_size: int, seed: int) -
             shortfall -= take(candidates[fact_count], shortfall, split)
         if shortfall:
             raise ValueError(f"train: {shortfall} queries short; too few independent query groups")
-    return selected
+    return sorted(selected, key=lambda row: (row["split"], row["query_id"]))
+
+
+def stable_random(seed: int, chunk_id: str) -> float:
+    """A uniform draw in [0, 1) fixed by the seed and chunk id, as in Jasper's code, so his corpus is reproduced."""
+    digest = hashlib.blake2b(f"{seed}\0{chunk_id}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / 2**64
 
 
 def build_corpus(
@@ -125,12 +150,14 @@ def build_corpus(
         filing, index = chunk_id.rsplit("_", 1)
         keep.update(f"{filing}_{int(index) + d}" for d in range(-neighbor_radius, neighbor_radius + 1))
 
-    rng = random.Random(seed)
     keep_probability = random_distractors / SEC_CORPUS_SIZE
     tables = []
     for path in corpus_paths:
         table = pq.read_table(path, columns=["chunk_id", "document_text"])
-        mask = [chunk_id in keep or rng.random() < keep_probability for chunk_id in table["chunk_id"].to_pylist()]
+        mask = [
+            chunk_id in keep or stable_random(seed, chunk_id) < keep_probability
+            for chunk_id in table["chunk_id"].to_pylist()
+        ]
         tables.append(table.filter(pa.array(mask)))
     return pa.concat_tables(tables).rename_columns(["chunk_id", "text"])
 
@@ -149,13 +176,12 @@ def main() -> None:
     snapshot_download(REPO_ID, repo_type="dataset", local_dir=raw_dir, allow_patterns=[QUERY_FILE, CORPUS_GLOB])
     corpus_paths = sorted(raw_dir.glob(CORPUS_GLOB))
 
-    # A few queries cite gold chunks that are not in the published corpus; drop them.
+    # A few queries cite gold chunks that are not in the published corpus; split_queries skips them.
     available = set()
     for path in corpus_paths:
         available.update(pq.read_table(path, columns=["chunk_id"])["chunk_id"].to_pylist())
-    rows = [row for row in load_queries(raw_dir) if gold_ids([row]) <= available]
 
-    queries = split_queries(rows, args.train_size, args.dev_size, args.seed)
+    queries = split_queries(load_queries(raw_dir), available, args.train_size, args.dev_size, args.seed)
     corpus = build_corpus(corpus_paths, queries, args.neighbor_radius, args.random_distractors, args.seed)
 
     pq.write_table(
