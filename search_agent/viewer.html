@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Search agent rollouts</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --card: #fff; --line: #e3e3df; --text: #1d1d1b; --muted: #6b6b66;
+    --gold: #9a6b00; --gold-bg: #fff4d6; --good: #1f7a3a; --good-bg: #e3f4e8; --bad: #b42318; --bad-bg: #fde8e6;
+    --accent: #2f5bd3; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 10; background: var(--card); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1150px; margin: 0 auto; padding: 10px 20px; display: flex; gap: 16px; align-items: center; }
+  .bar h1 { font-size: 16px; margin: 0; }
+  .bar h1 a { color: inherit; text-decoration: none; }
+  select, input { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); }
+  main { max-width: 1150px; margin: 0 auto; padding: 20px; }
+  a { color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .muted { color: var(--muted); }
+  .mono, code { font-family: var(--mono); font-size: 12.5px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; min-width: 120px; }
+  .stat b { display: block; font-size: 20px; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; background: #eeeeea; font-size: 12px; margin: 2px 4px 2px 0; white-space: nowrap; }
+  .pill.good { background: var(--good-bg); color: var(--good); }
+  .pill.bad { background: var(--bad-bg); color: var(--bad); }
+  .pill.gold { background: var(--gold-bg); color: var(--gold); font-weight: 600; }
+  .pill.curated { background: #e6ecfb; color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; background: var(--card); }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.query-row { cursor: pointer; }
+  tr.query-row:hover { background: #fafaf7; }
+  tr.trial-row { background: #fbfbf9; cursor: pointer; }
+  tr.trial-row:hover { background: #f1f4fd; }
+  tr.trial-row td:first-child { padding-left: 34px; }
+  .qtext { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+  .chip { display: inline-block; width: 38px; text-align: center; border-radius: 5px; font-size: 12px; margin-right: 3px; padding: 1px 0; font-variant-numeric: tabular-nums; }
+  .caret { display: inline-block; width: 14px; color: var(--muted); }
+  .crumbs { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .crumbs .spacer { flex: 1; }
+  .btn { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); cursor: pointer; text-decoration: none; color: var(--text); }
+  .btn:hover { background: #f0f0ec; }
+  .btn[disabled] { opacity: 0.4; cursor: default; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 6px 0 14px; }
+  .tab { padding: 8px 14px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); text-decoration: none; }
+  .tab.active { border-color: var(--text); color: var(--text); font-weight: 600; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+  .step-head { display: flex; gap: 10px; align-items: baseline; padding: 8px 14px; border-bottom: 1px solid var(--line); background: #fbfbf9; }
+  .step-head .n { color: var(--muted); font-family: var(--mono); font-size: 12px; min-width: 28px; }
+  .step-body { padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+  .text { white-space: pre-wrap; word-break: break-word; }
+  details > summary { cursor: pointer; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details.reasoning { border-left: 3px solid #d9d4c3; padding-left: 10px; }
+  details.reasoning > summary { color: var(--muted); }
+  details.reasoning[open] > summary .preview { display: none; }
+  details.reasoning .text { color: #45453f; margin-top: 4px; }
+  .msg { border-left: 3px solid var(--accent); padding-left: 10px; }
+  .chan { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-right: 6px; }
+  .call { background: #f4f6fb; border-radius: 8px; padding: 8px 10px; }
+  .call .tool { font-family: var(--mono); font-weight: 600; color: var(--accent); }
+  pre { margin: 4px 0 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12.5px; }
+  details.result { background: #fafaf7; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  details.result > summary { color: var(--muted); font-size: 12.5px; }
+  .hit { padding: 6px 0; border-top: 1px dashed var(--line); }
+  .hit:first-of-type { border-top: 0; }
+  .hit.is-gold { background: linear-gradient(90deg, var(--gold-bg), transparent 60%); }
+  .hit .title { color: var(--muted); font-size: 12.5px; }
+  .hit .snippet { font-size: 13px; }
+  .doc { max-height: 420px; overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  .err { background: var(--bad-bg); color: var(--bad); border-radius: 8px; padding: 8px 10px; }
+  .end { text-align: center; padding: 10px; color: var(--muted); }
+  .scoreline { font-family: var(--mono); font-size: 13px; line-height: 1.9; }
+  tr.found td:first-child { box-shadow: inset 3px 0 var(--good); }
+  tr.missed td:first-child { box-shadow: inset 3px 0 var(--bad); }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1><a href="#" id="home">Search agent rollouts</a></h1>
+    <select id="run-select" title="Rollout file"></select>
+    <span class="muted" id="run-note"></span>
+  </div>
+</header>
+<main id="app"><p class="muted">Loading…</p></main>
+<script>
+const app = document.getElementById("app");
+const runSelect = document.getElementById("run-select");
+const state = { runs: [], indexCache: {}, expanded: new Set(), search: "" };
+
+const STOP_NOTES = {
+  finish: "The model called finish.",
+  no_tool_call: "The last reply had no tool call, so the episode ended.",
+  parse_error: "Harmony could not parse the last reply (malformed message header), so the episode ended.",
+  truncated: "The last reply hit the per-reply generation limit.",
+  context_full: "The trajectory ran out of context.",
+  max_turns: "The trajectory reached the turn limit.",
+};
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+const fmt = v => (v ?? 0).toFixed(3);
+const f1Color = v => `hsl(${Math.round(v * 120)}, 55%, ${v > 0 ? 86 : 92}%)`;
+const params = () => new URLSearchParams(location.hash.slice(1));
+const hashFor = obj => "#" + new URLSearchParams(Object.entries(obj).filter(([, v]) => v !== undefined && v !== "")).toString();
+
+async function getJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: ${res.status} ${(await res.json().catch(() => ({}))).error ?? ""}`);
+  return res.json();
+}
+
+async function init() {
+  state.runs = await getJSON("/api/runs");
+  runSelect.innerHTML = state.runs.map(r => `<option value="${esc(r)}">${esc(r)}</option>`).join("");
+  runSelect.onchange = () => { state.expanded.clear(); location.hash = hashFor({run: runSelect.value}); };
+  document.getElementById("home").onclick = e => { e.preventDefault(); location.hash = hashFor({run: runSelect.value}); };
+  window.onhashchange = route;
+  route();
+}
+
+async function route() {
+  const p = params();
+  const run = p.get("run") || state.runs[0];
+  if (!run) { app.innerHTML = `<p class="muted">No rollout files in search_agent/data/rollouts/.</p>`; return; }
+  runSelect.value = run;
+  try {
+    if (p.get("q") && p.get("t")) await renderTrial(run, p.get("q"), Number(p.get("t")), p.get("tab") || "trajectory");
+    else await renderIndex(run);
+  } catch (err) {
+    app.innerHTML = `<div class="err">${esc(err.message)}</div>`;
+  }
+}
+
+// ---------- Index: queries and their trials ----------
+
+async function renderIndex(run) {
+  const data = state.indexCache[run] ??= await getJSON(`/api/runs/${encodeURIComponent(run)}`);
+  const s = data.summary;
+  document.getElementById("run-note").textContent = `${s.queries} queries × ${s.trials_per_query} trials`;
+  const stops = Object.entries(s.stop_reasons).map(([k, v]) => `<span class="pill">${esc(k)} ${v}</span>`).join("");
+  app.innerHTML = `
+    <div class="stats">
+      <div class="stat"><b>${fmt(s.best_f1)}</b><span>best-of-${s.trials_per_query} F1</span></div>
+      <div class="stat"><b>${fmt(s.best_precision)}</b><span>best-of-${s.trials_per_query} precision</span></div>
+      <div class="stat"><b>${fmt(s.best_recall)}</b><span>best-of-${s.trials_per_query} recall</span></div>
+      <div class="stat"><b>${fmt(s.trial1_f1)}</b><span>trial 1 F1</span></div>
+      <div class="stat"><b>${fmt(s.mean_f1)}</b><span>mean F1, all ${s.rollouts} rollouts</span></div>
+      <div class="stat"><b>${fmt(s.mean_reward)}</b><span>mean reward (F4)</span></div>
+      <div class="stat"><b>${s.nothing_curated_queries}/${s.queries}</b><span>queries with nothing curated</span></div>
+    </div>
+    <div class="card"><span class="muted">Stop reasons:</span> ${stops}</div>
+    <div class="toolbar">
+      <input id="search" placeholder="Search query id or text" size="40" value="${esc(state.search)}">
+      <button class="btn" id="expand-all">Expand all</button>
+      <button class="btn" id="collapse-all">Collapse all</button>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Query</th><th class="num">Facts</th><th class="num">Best F1</th><th class="num">Trial 1 F1</th>
+        <th class="num">Mean F1</th><th>F1 per trial</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>`;
+  const search = document.getElementById("search");
+  search.oninput = () => { state.search = search.value; drawRows(run, data); };
+  document.getElementById("expand-all").onclick = () => { data.queries.forEach(q => state.expanded.add(q.query_id)); drawRows(run, data); };
+  document.getElementById("collapse-all").onclick = () => { state.expanded.clear(); drawRows(run, data); };
+  drawRows(run, data);
+}
+
+function drawRows(run, data) {
+  const needle = state.search.toLowerCase();
+  const rows = [];
+  for (const q of data.queries) {
+    if (needle && !`${q.query_id} ${q.query}`.toLowerCase().includes(needle)) continue;
+    const f1s = q.trials.map(t => t.f1);
+    const open = state.expanded.has(q.query_id);
+    const chips = q.trials.map(t =>
+      `<a class="chip" style="background:${f1Color(t.f1)};color:inherit;text-decoration:none" title="trial ${t.trial}: ${esc(t.stop_reason)}"
+          href="${hashFor({run, q: q.query_id, t: t.trial})}" onclick="event.stopPropagation()">${t.f1.toFixed(2)}</a>`).join("");
+    rows.push(`
+      <tr class="query-row" data-q="${esc(q.query_id)}">
+        <td><span class="caret">${open ? "▾" : "▸"}</span><b class="mono">${esc(q.query_id)}</b><div class="qtext">${esc(q.query)}</div></td>
+        <td class="num">${q.num_facts}</td>
+        <td class="num"><b>${fmt(Math.max(...f1s))}</b></td>
+        <td class="num">${fmt(q.trials[0].f1)}</td>
+        <td class="num">${fmt(f1s.reduce((a, b) => a + b, 0) / f1s.length)}</td>
+        <td>${chips}</td>
+      </tr>`);
+    if (!open) continue;
+    rows.push(`<tr class="trial-row" style="cursor:default"><th>Trial</th><th class="num">F1</th><th class="num">Precision</th>
+      <th class="num">Recall</th><th class="num">Reward</th><th>Stop · turns · curated</th></tr>`);
+    for (const t of q.trials) {
+      rows.push(`
+        <tr class="trial-row" data-href="${hashFor({run, q: q.query_id, t: t.trial})}">
+          <td><a href="${hashFor({run, q: q.query_id, t: t.trial})}">Trial ${t.trial}</a></td>
+          <td class="num"><span class="chip" style="background:${f1Color(t.f1)}">${t.f1.toFixed(2)}</span></td>
+          <td class="num">${fmt(t.precision)}</td>
+          <td class="num">${fmt(t.recall)}</td>
+          <td class="num">${fmt(t.reward)}</td>
+          <td><span class="pill ${t.stop_reason === "finish" ? "good" : "bad"}">${esc(t.stop_reason)}</span>
+              <span class="muted">${t.turns} turns · ${t.num_curated} curated</span></td>
+        </tr>`);
+    }
+  }
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = rows.join("") || `<tr><td colspan="6" class="muted">No matching queries.</td></tr>`;
+  tbody.querySelectorAll("tr.query-row").forEach(tr => tr.onclick = () => {
+    const id = tr.dataset.q;
+    state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id);
+    drawRows(run, data);
+  });
+  tbody.querySelectorAll("tr.trial-row[data-href]").forEach(tr => tr.onclick = () => { location.hash = tr.dataset.href; });
+}
+
+// ---------- Trial: trajectory and verifier ----------
+
+async function renderTrial(run, queryId, trial, tab) {
+  const d = await getJSON(`/api/runs/${encodeURIComponent(run)}/${encodeURIComponent(queryId)}/${trial}`);
+  const s = d.scores;
+  const curated = new Set(d.curated_ids);
+  const i = d.trials.indexOf(trial);
+  const link = (t, label) => t === undefined
+    ? `<button class="btn" disabled>${label}</button>`
+    : `<a class="btn" href="${hashFor({run, q: queryId, t, tab})}">${label}</a>`;
+  document.getElementById("run-note").textContent = "";
+  app.innerHTML = `
+    <div class="crumbs">
+      <a href="${hashFor({run})}">${esc(run)}</a><span class="muted">/</span>
+      <b class="mono">${esc(queryId)}</b><span class="muted">/</span><b>Trial ${trial}</b>
+      <span class="spacer"></span>
+      ${link(d.trials[i - 1], "← Prev trial")} ${link(d.trials[i + 1], "Next trial →")}
+    </div>
+    <div class="stats">
+      <div class="stat"><b style="color:${s.f1 > 0 ? "var(--good)" : "var(--bad)"}">${fmt(s.f1)}</b><span>F1</span></div>
+      <div class="stat"><b>${fmt(s.precision)}</b><span>precision</span></div>
+      <div class="stat"><b>${fmt(s.recall)}</b><span>recall</span></div>
+      <div class="stat"><b>${fmt(s.reward)}</b><span>reward (F4)</span></div>
+      <div class="stat"><b>${s.turns}</b><span>turns</span></div>
+      <div class="stat"><b style="font-size:15px;padding:4px 0">${esc(s.stop_reason)}</b><span>stop reason</span></div>
+    </div>
+    <div class="card"><div class="muted" style="font-size:12px">Query · ${d.facts.length} facts</div><div class="text">${esc(d.query)}</div></div>
+    <div class="tabs">
+      <a class="tab ${tab === "trajectory" ? "active" : ""}" href="${hashFor({run, q: queryId, t: trial})}">Trajectory</a>
+      <a class="tab ${tab === "verifier" ? "active" : ""}" href="${hashFor({run, q: queryId, t: trial, tab: "verifier"})}">Verifier</a>
+    </div>
+    <div id="tab-body"></div>`;
+  const body = document.getElementById("tab-body");
+  if (tab === "verifier") body.innerHTML = verifierHTML(d, curated);
+  else {
+    body.innerHTML = trajectoryHTML(d);
+    document.getElementById("open-reasoning").onclick = () => body.querySelectorAll("details.reasoning").forEach(x => x.open = true);
+    document.getElementById("close-reasoning").onclick = () => body.querySelectorAll("details.reasoning").forEach(x => x.open = false);
+  }
+}
+
+// `curated` is the curated set at that point in the trajectory; `note` overrides the badge (e.g. "newly curated").
+function chunkTag(id, d, curated, note) {
+  const facts = d.gold[id];
+  const gold = facts ? `<span class="pill gold">GOLD fact${facts.length > 1 ? "s" : ""} ${facts.join(", ")}</span>` : "";
+  const label = note ?? (curated.has(id) ? "curated" : "");
+  const cur = label ? `<span class="pill curated">${esc(label)}</span>` : "";
+  return `<code>${esc(id)}</code> ${gold} ${cur}`;
+}
+
+function trajectoryHTML(d) {
+  // Track the curated set as it changes: every tool result except read_document carries the current curated_ids.
+  let curated = new Set();
+  const steps = d.steps.map((step, i) => {
+    const last = i === d.steps.length - 1;
+    const parts = step.messages.map(m => {
+      if (m.channel === "analysis") {
+        const preview = m.text.replace(/\s+/g, " ").slice(0, 160);
+        return `<details class="reasoning"><summary>💡 Reasoning <span class="preview">— ${esc(preview)}${m.text.length > 160 ? "…" : ""}</span></summary>
+                <div class="text">${esc(m.text)}</div></details>`;
+      }
+      return `<div class="msg"><span class="chan">${esc(m.channel || "message")}</span><span class="text">${esc(m.text)}</span></div>`;
+    });
+    let title = step.messages.length ? `<span class="muted">${esc(step.messages.at(-1).channel || "message")}</span>` : "";
+    if (step.call) {
+      title = `<span class="mono"><b>${esc(step.call.recipient.replace(/^functions\./, ""))}</b></span>`;
+      let args = step.call.arguments;
+      try { args = JSON.stringify(JSON.parse(args), null, 2); } catch (e) {}
+      parts.push(`<div class="call"><span class="tool">→ ${esc(step.call.recipient)}</span><pre>${esc(args)}</pre></div>`);
+    }
+    if (last && d.scores.stop_reason === "parse_error") {
+      parts.push(`<div class="err"><b>Parse error.</b> Harmony rejected this reply's message header:
+                  <pre>${esc(step.call ? step.call.header : "(no tool call header)")}</pre></div>`);
+    }
+    if (step.result !== null) {
+      parts.push(resultHTML(step.result, step.call, d, curated));
+      if (Array.isArray(step.result.curated_ids)) curated = new Set(step.result.curated_ids);
+    }
+    return `<div class="step"><div class="step-head"><span class="n">#${i + 1}</span>${title}</div><div class="step-body">${parts.join("")}</div></div>`;
+  });
+  return `
+    <div class="toolbar">
+      <button class="btn" id="open-reasoning">Expand all reasoning</button>
+      <button class="btn" id="close-reasoning">Collapse all reasoning</button>
+    </div>
+    ${steps.join("")}
+    <div class="end"><span class="pill ${d.scores.stop_reason === "finish" ? "good" : "bad"}">${esc(d.scores.stop_reason)}</span>
+      ${esc(STOP_NOTES[d.scores.stop_reason] ?? "")} Curated ${d.curated_ids.length} chunks.
+      <a href="${hashFor({run: d.run, q: d.query_id, t: d.trial, tab: "verifier"})}">See the verifier →</a></div>`;
+}
+
+function resultHTML(r, call, d, curated) {
+  const tool = call ? call.recipient.replace(/^functions\./, "") : "tool";
+  let inner, summary = `← ${esc(tool)} result`;
+  if (typeof r === "string") inner = `<pre>${esc(r)}</pre>`;
+  else if (r.error) inner = `<div class="err">${esc(r.error)}</div>`;
+  else if (Array.isArray(r.results)) {
+    const goldHits = r.results.filter(h => d.gold[h.chunk_id]).length;
+    summary += ` · ${r.results.length} hits${goldHits ? ` · <span class="pill gold">${goldHits} gold</span>` : ""}`;
+    inner = r.results.map(h => `
+      <div class="hit ${d.gold[h.chunk_id] ? "is-gold" : ""}">
+        ${chunkTag(h.chunk_id, d, curated)} <span class="title">${esc(h.title)}</span>
+        <div class="snippet">${esc(h.snippet)}</div>
+      </div>`).join("") + `<div class="muted" style="font-size:12px;margin-top:4px">seen ${r.seen_count} · curated ${r.curated_count}</div>`;
+  } else if (r.text !== undefined) {
+    if (d.gold[r.chunk_id]) summary += ` · <span class="pill gold">gold</span>`;
+    inner = `<div>${chunkTag(r.chunk_id, d, curated)}${r.truncated ? ` <span class="muted">(truncated)</span>` : ""}</div>
+             <div class="doc"><div class="text">${esc(r.text)}</div></div>`;
+  } else if (r.added || r.removed) {
+    const ids = r.added ?? r.removed;
+    const extras = Object.fromEntries(Object.entries(r).filter(([k]) => !["added", "removed", "curated_ids", "curated_count"].includes(k)));
+    inner = `<div><b>${r.added ? "Added" : "Removed"}</b>: ${ids.length ? ids.map(id => chunkTag(id, d, curated, r.added ? "newly curated" : "dropped")).join("<br>") : "<span class='muted'>none</span>"}</div>
+             <div class="muted" style="font-size:12px">curated ${r.curated_count}</div>
+             ${Object.keys(extras).length ? `<pre>${esc(JSON.stringify(extras, null, 2))}</pre>` : ""}`;
+  } else inner = `<pre>${esc(JSON.stringify(r, null, 2))}</pre>`;
+  return `<details class="result" open><summary>${summary}</summary>${inner}</details>`;
+}
+
+function verifierHTML(d, curated) {
+  const s = d.scores;
+  const goldCurated = d.curated_ids.filter(id => d.gold[id]).length;
+  const found = d.facts.filter(f => f.found_by.length).length;
+  const reward = d.curated_ids.length ? `F4 = ${fmt(s.reward)}` : `${fmt(s.reward)} (nothing curated)`;
+  const facts = d.facts.map((f, i) => `
+    <tr class="${f.found_by.length ? "found" : "missed"}">
+      <td class="num">${i + 1}</td>
+      <td><div class="text">${esc(f.fact)}</div>
+        <details style="margin-top:4px"><summary class="muted" style="font-size:12px">${f.chunk_ids.length} gold chunks ▸</summary>
+          ${f.chunk_ids.map(id => `<div>${chunkTag(id, d, curated)}</div>`).join("")}</details></td>
+      <td>${f.is_final_answer ? `<span class="pill">final answer</span>` : ""}</td>
+      <td>${f.found_by.length ? `<span class="pill good">found</span><br>${f.found_by.map(id => `<code>${esc(id)}</code>`).join("<br>")}`
+                              : `<span class="pill bad">missed</span>`}</td>
+    </tr>`).join("");
+  const cur = d.curated_ids.map((id, i) => `
+    <tr><td class="num">${i + 1}</td><td><code>${esc(id)}</code></td>
+      <td>${d.gold[id] ? `<span class="pill gold">GOLD fact${d.gold[id].length > 1 ? "s" : ""} ${d.gold[id].join(", ")}</span>` : `<span class="pill bad">not gold</span>`}</td></tr>`).join("");
+  return `
+    <div class="card"><div class="muted" style="font-size:12px">Answer</div><div class="text"><b>${esc(d.answer)}</b></div></div>
+    <div class="card scoreline">
+      precision = gold curated / curated = ${goldCurated} / ${d.curated_ids.length} = ${fmt(s.precision)}<br>
+      recall&nbsp;&nbsp;&nbsp;&nbsp;= facts found / facts&nbsp;&nbsp;&nbsp;= ${found} / ${d.facts.length} = ${fmt(s.recall)}<br>
+      F1&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= 2PR / (P + R)&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ${fmt(s.f1)}<br>
+      reward&nbsp;&nbsp;&nbsp;&nbsp;= ${reward}<span class="muted"> (F4 = 17PR / (16P + R); −0.2 if nothing curated)</span><br>
+      stop&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= ${esc(s.stop_reason)} after ${s.turns} turns
+    </div>
+    <div class="muted" style="margin:4px 0 6px">A fact is found if any of its gold chunks is curated.</div>
+    <table style="margin-bottom:14px">
+      <thead><tr><th class="num">#</th><th>Fact</th><th></th><th>Found by</th></tr></thead>
+      <tbody>${facts}</tbody>
+    </table>
+    <div class="muted" style="margin:4px 0 6px">Curated set (${d.curated_ids.length})</div>
+    <table>
+      <thead><tr><th class="num">#</th><th>Chunk</th><th>Gold for</th></tr></thead>
+      <tbody>${cur || `<tr><td colspan="3" class="muted">Nothing curated.</td></tr>`}</tbody>
+    </table>`;
+}
+
+init().catch(err => { app.innerHTML = `<div class="err">${esc(err.message)}</div>`; });
+</script>
+</body>
+</html>
