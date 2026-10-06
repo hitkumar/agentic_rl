@@ -28,7 +28,8 @@ Install dependencies:
 uv sync --locked
 ```
 
-Download the Harness-1 SEC data and prepare `search_agent/data/queries.parquet` and `search_agent/data/corpus.parquet`:
+Download the Harness-1 SEC data and prepare `search_agent/data/queries.parquet`, `search_agent/data/corpus.parquet`, and
+the RL training splits `search_agent/data/train.parquet` and `search_agent/data/dev.parquet`:
 
 ```bash
 uv run python -u search_agent/prepare_data.py

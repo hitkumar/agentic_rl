@@ -72,3 +72,32 @@ Checked and ruled out:
 - Scoring: Jasper's `score_submission` matches `rewards.score`, and his qrels are the union of fact chunks, as ours.
 - Tool limits: snippet 220 chars, read 4,000 chars, 30 curated, k 10/25, 40 turns, and 2,048 generation tokens all
   match.
+
+## Overfit check: 32 queries, full fine-tuning with SkyRL
+
+TLDR: the pipeline learns. Training reward rose from 0.09 to 0.33 in 4 steps, then plateaued at about 0.30–0.33 through
+step 7, below the 0.43 best-of-4 reward of the selected queries. Stopped after 7 of 30 planned steps.
+
+Setup: the 32 train queries with the highest reward std among 64 baseline queries (4 trials each), as in Mercor's
+overfit test. 8 rollouts per query, batch 32, one optimizer step per batch (so one step per epoch), LR 1e-5, full
+fine-tuning of `unsloth/gpt-oss-20b-BF16` on 8x A100, 30,720-token context. Run: `overfit32`.
+
+| Step | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|
+| reward (F4) | 0.087 | 0.102 | 0.281 | 0.334 | 0.325 | 0.335 | 0.295 |
+| F1 | 0.205 | 0.207 | 0.297 | 0.313 | 0.282 | 0.294 | 0.273 |
+| turns | 18.8 | 8.1 | 10.4 | 16.7 | 18.4 | 20.0 | 18.3 |
+| ended by plain reply (no finish call) | 0.08 | 0.42 | 0.68 | 0.57 | 0.33 | 0.41 | 0.56 |
+| trainer vs vLLM logprob, mean abs diff | 0.026 | 0.030 | 0.031 | 0.026 | 0.025 | 0.025 | 0.027 |
+| step time (s) | 1,080 | 450 | 412 | 650 | 940 | 871 | 747 |
+
+- The logprob diff sits at Mercor's "below 0.03 is healthy" mark and doesn't grow, so weight sync is sound.
+- More episodes end with a plain reply instead of `finish`. That scores the same as `finish`, so it isn't penalized.
+
+Fixes that made the run possible (all in `skyrl_patches.py` except the tool pool):
+
+| Problem | Fix | Effect |
+|---|---|---|
+| Attention backward ~180x slower with gpt-oss's attention sinks in SkyRL's flex attention | Compute attention without sinks, then apply them from the logsumexp | Training step practical at 30k tokens |
+| Tool calls ran on the event loop shared by all 256 episodes, stalling generation | Run them in a pool of 32 processes (`trajectory.tool_pool`) | Step-1 generation 818 s → 507 s |
+| Out of memory at step 3: SkyRL loads the 21 GB/GPU Adam state before the forward and backward passes | Load it just before the optimizer step | Peak fits; 30.9k-token sequences train with Adam state allocated |

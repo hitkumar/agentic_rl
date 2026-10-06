@@ -92,5 +92,9 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
 
+# skyrl's editable install is an import hook, which type checkers can't follow; point them at its checkout.
 [tool.pyrefly]
-search-path = [".", "src"]
+search-path = [".", "src", "/home/htkumar/oss/SkyRL-v0.3.0"]
+
+[tool.pyright]
+extraPaths = [".", "src", "/home/htkumar/oss/SkyRL-v0.3.0"]

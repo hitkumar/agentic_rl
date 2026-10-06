@@ -21,7 +21,9 @@ Jasper's blog table (initial explorations: 4 trials on each of the 32 eval queri
 import argparse
 import asyncio
 import json
+import multiprocessing
 from collections import Counter
+from concurrent.futures import Executor, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -52,6 +54,8 @@ MAX_TURNS = 40
 # Prompt plus responses; the default for --context-length. The vLLM server's --max-model-len must be at least this.
 CONTEXT_LENGTH = 65_536
 MAX_GENERATION_TOKENS = 2_048
+# Processes running tool calls; see tool_pool.
+TOOL_PROCESSES = 32
 
 TOOLS = [ToolDescription.new(**spec) for spec in TOOL_SPECS]
 TOOL_NAMES = {spec["name"] for spec in TOOL_SPECS}
@@ -127,6 +131,29 @@ def render_prompt(query: str) -> list[int]:
     return ENCODING.render_conversation_for_completion(Conversation.from_messages(messages), Role.ASSISTANT)
 
 
+def tool_pool(processes: int = TOOL_PROCESSES) -> Executor:
+    """Processes that run the tool calls, each with its own Index.
+
+    A search takes up to a few hundred ms, mostly in Python. Run on the event loop, it would hold up every other
+    episode; run in threads, the searches would contend for the GIL and overrun grep_corpus's time limit.
+    """
+    return ProcessPoolExecutor(processes, mp_context=multiprocessing.get_context("spawn"), initializer=open_index)
+
+
+index: Index | None = None  # In each tool_pool process.
+
+
+def open_index() -> None:
+    global index
+    index = Index()
+
+
+def run_tool_in_pool(session: Session, recipient: str, arguments: str) -> tuple[dict, Session]:
+    """run_tool in a tool_pool process; also returns the session, whose changes are otherwise lost there."""
+    assert index is not None  # Set by open_index when the process starts.
+    return run_tool(SearchTools(index, session), recipient, arguments), session
+
+
 def run_tool(tools: SearchTools, recipient: str, arguments: str) -> dict:
     name = recipient.removeprefix("functions.")
     if name not in TOOL_NAMES:
@@ -144,10 +171,11 @@ def run_tool(tools: SearchTools, recipient: str, arguments: str) -> dict:
 
 
 async def run_trajectory(
-    sampler: Sampler, index: Index, query: str, facts: list[dict], context_length: int = CONTEXT_LENGTH
+    sampler: Sampler, tools: Executor, query: str, facts: list[dict], context_length: int = CONTEXT_LENGTH
 ) -> Trajectory:
+    """Runs the tool calls in tools, a tool_pool."""
     trajectory = Trajectory(prompt_ids=render_prompt(query))
-    tools = SearchTools(index, trajectory.session)
+    loop = asyncio.get_running_loop()
     while trajectory.turns < MAX_TURNS:
         max_tokens = min(
             MAX_GENERATION_TOKENS, context_length - len(trajectory.prompt_ids) - len(trajectory.response_ids)
@@ -174,7 +202,9 @@ async def run_trajectory(
         if not recipient.startswith("functions.") or not isinstance(content, TextContent):
             trajectory.stop_reason = "no_tool_call"
             break
-        observation = run_tool(tools, recipient, content.text)
+        observation, trajectory.session = await loop.run_in_executor(
+            tools, run_tool_in_pool, trajectory.session, recipient, content.text
+        )
         if trajectory.session.finished:
             trajectory.stop_reason = "finish"
             break
@@ -268,25 +298,25 @@ async def main() -> None:
 
     queries = pd.read_parquet(DATA_DIR / "queries.parquet")
     queries = queries[queries.split == args.split].head(args.limit)
-    index = Index()
-    async with httpx.AsyncClient(base_url=args.server, timeout=None) as client:
-        sampler = VLLMSampler(client, args.model)
+    with tool_pool() as tools:
+        async with httpx.AsyncClient(base_url=args.server, timeout=None) as client:
+            sampler = VLLMSampler(client, args.model)
 
-        async def run(row, trial: int) -> Rollout:
-            facts = json.loads(row.facts)
-            trajectory = await run_trajectory(sampler, index, row.query, facts, args.context_length)
-            f1 = score(trajectory.session.curated_ids, facts, beta=1.0)
-            print(
-                f"{row.query_id} trial {trial}: f1={f1.f_beta:.3f} p={f1.precision:.3f} r={f1.recall:.3f} "
-                f"reward={trajectory.reward:.3f} stop={trajectory.stop_reason} turns={trajectory.turns} "
-                f"curated={len(trajectory.session.curated_ids)} tokens={len(trajectory.response_ids)}",
-                flush=True,
+            async def run(row, trial: int) -> Rollout:
+                facts = json.loads(row.facts)
+                trajectory = await run_trajectory(sampler, tools, row.query, facts, args.context_length)
+                f1 = score(trajectory.session.curated_ids, facts, beta=1.0)
+                print(
+                    f"{row.query_id} trial {trial}: f1={f1.f_beta:.3f} p={f1.precision:.3f} r={f1.recall:.3f} "
+                    f"reward={trajectory.reward:.3f} stop={trajectory.stop_reason} turns={trajectory.turns} "
+                    f"curated={len(trajectory.session.curated_ids)} tokens={len(trajectory.response_ids)}",
+                    flush=True,
+                )
+                return Rollout(row.query_id, trial, trajectory, f1)
+
+            rollouts = await asyncio.gather(
+                *(run(row, trial) for row in queries.itertuples() for trial in range(1, args.samples + 1))
             )
-            return Rollout(row.query_id, trial, trajectory, f1)
-
-        rollouts = await asyncio.gather(
-            *(run(row, trial) for row in queries.itertuples() for trial in range(1, args.samples + 1))
-        )
     report(rollouts)
     if args.output:
         write_rollouts(rollouts, args.output)

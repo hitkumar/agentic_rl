@@ -13,6 +13,10 @@ Outputs in --out-dir:
                    - the chunks within --neighbor-radius positions of each gold chunk in the same
                      filing: similar text without the fact (hard distractors);
                    - about --random-distractors random chunks from the full corpus.
+  train.parquet,   The splits of queries.parquet in SkyRL's dataset format, for RL training. Columns: prompt, query_id,
+  dev.parquet      query, facts, data_source. prompt is the query as a chat message; SkyRL uses it only to drop
+                   over-long prompts, and the search generator renders the real prompt from query. data_source names
+                   the dataset in SkyRL's eval metrics and dumps.
 
 Usage:
   uv run python search_agent/prepare_data.py
@@ -162,6 +166,23 @@ def build_corpus(
     return pa.concat_tables(tables).rename_columns(["chunk_id", "text"])
 
 
+def write_training_splits(out_dir: Path) -> None:
+    queries = pq.read_table(out_dir / "queries.parquet").to_pylist()
+    for split in ("train", "dev"):
+        rows = [
+            {
+                "prompt": [{"role": "user", "content": q["query"]}],
+                "query_id": q["query_id"],
+                "query": q["query"],
+                "facts": q["facts"],
+                "data_source": "sec_search",
+            }
+            for q in queries
+            if q["split"] == split
+        ]
+        pq.write_table(pa.Table.from_pylist(rows), out_dir / f"{split}.parquet")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out-dir", type=Path, default=Path(__file__).parent / "data")
@@ -200,6 +221,7 @@ def main() -> None:
         args.out_dir / "queries.parquet",
     )
     pq.write_table(corpus, args.out_dir / "corpus.parquet")
+    write_training_splits(args.out_dir)
     print(f"queries: {len(queries)} ({args.dev_size} dev), corpus: {corpus.num_rows} chunks")
 
 
