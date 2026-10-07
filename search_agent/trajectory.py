@@ -132,26 +132,23 @@ def render_prompt(query: str) -> list[int]:
 
 
 def tool_pool(processes: int = TOOL_PROCESSES) -> Executor:
-    """Processes that run the tool calls, each with its own Index.
+    """Processes that run the tool calls, each with its own Indexes.
 
     A search takes up to a few hundred ms, mostly in Python. Run on the event loop, it would hold up every other
     episode; run in threads, the searches would contend for the GIL and overrun grep_corpus's time limit.
     """
-    return ProcessPoolExecutor(processes, mp_context=multiprocessing.get_context("spawn"), initializer=open_index)
+    return ProcessPoolExecutor(processes, mp_context=multiprocessing.get_context("spawn"))
 
 
-index: Index | None = None  # In each tool_pool process.
+# In each tool_pool process: an Index per corpus, opened on first use.
+indexes: dict[str, Index] = {}
 
 
-def open_index() -> None:
-    global index
-    index = Index()
-
-
-def run_tool_in_pool(session: Session, recipient: str, arguments: str) -> tuple[dict, Session]:
+def run_tool_in_pool(session: Session, corpus: str, recipient: str, arguments: str) -> tuple[dict, Session]:
     """run_tool in a tool_pool process; also returns the session, whose changes are otherwise lost there."""
-    assert index is not None  # Set by open_index when the process starts.
-    return run_tool(SearchTools(index, session), recipient, arguments), session
+    if corpus not in indexes:
+        indexes[corpus] = Index(DATA_DIR / corpus)
+    return run_tool(SearchTools(indexes[corpus], session), recipient, arguments), session
 
 
 def run_tool(tools: SearchTools, recipient: str, arguments: str) -> dict:
@@ -171,9 +168,17 @@ def run_tool(tools: SearchTools, recipient: str, arguments: str) -> dict:
 
 
 async def run_trajectory(
-    sampler: Sampler, tools: Executor, query: str, facts: list[dict], context_length: int = CONTEXT_LENGTH
+    sampler: Sampler,
+    tools: Executor,
+    query: str,
+    facts: list[dict],
+    context_length: int = CONTEXT_LENGTH,
+    corpus: str = "",
 ) -> Trajectory:
-    """Runs the tool calls in tools, a tool_pool."""
+    """Runs the tool calls in tools, a tool_pool, against the index in DATA_DIR / corpus.
+
+    corpus "" is DATA_DIR itself; e.g. "sec_256" is the 256-query ablation set's smaller corpus.
+    """
     trajectory = Trajectory(prompt_ids=render_prompt(query))
     loop = asyncio.get_running_loop()
     while trajectory.turns < MAX_TURNS:
@@ -203,7 +208,7 @@ async def run_trajectory(
             trajectory.stop_reason = "no_tool_call"
             break
         observation, trajectory.session = await loop.run_in_executor(
-            tools, run_tool_in_pool, trajectory.session, recipient, content.text
+            tools, run_tool_in_pool, trajectory.session, corpus, recipient, content.text
         )
         if trajectory.session.finished:
             trajectory.stop_reason = "finish"
@@ -293,6 +298,9 @@ async def main() -> None:
     parser.add_argument("--limit", type=int, default=8, help="number of queries to run, concurrently")
     parser.add_argument("--samples", type=int, default=1, help="trajectories per query")
     parser.add_argument("--context-length", type=int, default=CONTEXT_LENGTH, help="token cap on prompt plus responses")
+    parser.add_argument(
+        "--corpus", default="", help="search the index in this subdirectory of search_agent/data, e.g. sec_256"
+    )
     parser.add_argument("--output", type=Path, help="write every rollout, with its decoded transcript, as JSONL")
     args = parser.parse_args()
 
@@ -304,7 +312,7 @@ async def main() -> None:
 
             async def run(row, trial: int) -> Rollout:
                 facts = json.loads(row.facts)
-                trajectory = await run_trajectory(sampler, tools, row.query, facts, args.context_length)
+                trajectory = await run_trajectory(sampler, tools, row.query, facts, args.context_length, args.corpus)
                 f1 = score(trajectory.session.curated_ids, facts, beta=1.0)
                 print(
                     f"{row.query_id} trial {trial}: f1={f1.f_beta:.3f} p={f1.precision:.3f} r={f1.recall:.3f} "

@@ -3,9 +3,13 @@
 # colocated on the same GPUs.
 #
 # Based on SkyRL's gpt-oss example (examples/train/gptoss/run_gsm8k_gptoss.sh). Follows Jasper's run where it applies:
-# 64 queries x 8 rollouts per step, advantages centered within each group (no std normalization), no KL. He trained a
-# LoRA with LR 1e-4; this is full fine-tuning (SkyRL's LoRA for gpt-oss would skip the MoE experts), so the LR is
-# 3e-6, the best of the LR sweep in results.md.
+# 64 queries x 8 rollouts per step for 24 steps (1.5 epochs of the 1,024 train queries), advantages centered within
+# each group (no std normalization), no KL. He trained a LoRA with LR 1e-4; this is full fine-tuning (SkyRL's LoRA
+# for gpt-oss would skip the MoE experts), so the LR is 3e-6, the best of the LR sweep in results.md.
+#
+# Evals use his held-out set: the first 32 dev queries, searched over the 124k-chunk corpus of the 256-query ablation
+# set (search_agent/data/sec_256) rather than the training corpus. dev32_sec256.parquet is dev.parquet's first 32 rows
+# with a corpus column set to sec_256.
 #
 # The loss matches Tinker's importance_sampling loss, which he used: -sum over generated tokens of
 # (p_theta / q_sampler) * advantage, summed over tokens rather than averaged. rollout_is has the same gradient; the clip
@@ -13,11 +17,17 @@
 # constant batch size x max_seq_len, which Adam cancels. rollout_is also skips the trainer's forward pass for the old
 # logprobs, since it uses vLLM's.
 #
-# Run from the repo root. Extra key=value arguments override the defaults below, e.g. a one-step smoke test on a
+# Run from the repo root. RUN_NAME names the run (default full_lr3e-6); its checkpoints, eval dumps and TensorBoard
+# logs go under their own directories, so a new run neither resumes from another run's checkpoint (resume_mode=latest)
+# nor overwrites its eval dumps. Extra key=value arguments override the defaults below, e.g. a one-step smoke test on a
 # 4-query train file:
-#   bash search_agent/train.sh data.train_data="['outputs/search_agent/smoke/train.parquet']" \
+#   RUN_NAME=smoke bash search_agent/train.sh data.train_data="['outputs/search_agent/smoke/train.parquet']" \
 #     trainer.train_batch_size=4 trainer.policy_mini_batch_size=4 generator.n_samples_per_prompt=4 trainer.epochs=1 \
-#     trainer.eval_before_train=false trainer.eval_interval=-1 trainer.ckpt_interval=-1 trainer.run_name=smoke
+#     trainer.eval_before_train=false trainer.eval_interval=-1 trainer.ckpt_interval=-1
+#
+# A Hugging Face copy of the model (servable with vllm serve, for evals with trajectory.py) is saved at the end of
+# each epoch and of training, under outputs/search_agent/exports/<run>/global_step_<N>/policy. SkyRL saves it at every
+# epoch end and every hf_save_interval steps, so hf_save_interval is the steps per epoch (train queries / batch size).
 #
 # Metrics go to TensorBoard under outputs/search_agent/logs/tensorboard/<run_name>, e.g. the vLLM vs trainer logprob
 # gap, policy/minibatch_rollout_logprobs_abs_diff_mean:
@@ -27,6 +37,7 @@ set -euo pipefail
 DATA_DIR=search_agent/data
 CONTEXT_LENGTH=30720
 OUT_DIR="$PWD/outputs/search_agent"
+RUN_NAME="${RUN_NAME:-full_lr3e-6}"
 
 # Ray workers import search_agent, so the repo root must be on their path.
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
@@ -53,7 +64,7 @@ export RAY_ADDRESS=auto
 # the repo, which lacks the local SkyRL checkout.
 .venv/bin/python -u -m search_agent.train \
   data.train_data="['$DATA_DIR/train.parquet']" \
-  data.val_data="['$DATA_DIR/dev.parquet']" \
+  data.val_data="['$OUT_DIR/dev32_sec256.parquet']" \
   environment.env_class=search \
   trainer.policy.model.path=unsloth/gpt-oss-20b-BF16 \
   trainer.strategy=fsdp \
@@ -84,7 +95,8 @@ export RAY_ADDRESS=auto
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.epochs=20 \
+  trainer.epochs=2 \
+  trainer.max_training_steps=24 \
   generator.n_samples_per_prompt=8 \
   trainer.max_prompt_length=2048 \
   generator.max_input_length=$CONTEXT_LENGTH \
@@ -93,16 +105,17 @@ export RAY_ADDRESS=auto
   generator.eval_sampling_params.temperature=1.0 \
   generator.eval_sampling_params.max_generate_length=2048 \
   generator.eval_n_samples_per_prompt=4 \
-  trainer.eval_batch_size=64 \
+  trainer.eval_batch_size=32 \
   trainer.eval_before_train=true \
-  trainer.eval_interval=4 \
+  trainer.eval_interval=8 \
   trainer.ckpt_interval=8 \
+  trainer.hf_save_interval=16 \
   trainer.max_ckpts_to_keep=2 \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$OUT_DIR/checkpoints" \
-  trainer.export_path="$OUT_DIR/exports" \
+  trainer.ckpt_path="$OUT_DIR/checkpoints/$RUN_NAME" \
+  trainer.export_path="$OUT_DIR/exports/$RUN_NAME" \
   trainer.log_path="$OUT_DIR/logs" \
   trainer.logger=tensorboard \
   trainer.project_name=search_agent \
-  trainer.run_name=grpo_64x8 \
+  trainer.run_name="$RUN_NAME" \
   "$@"

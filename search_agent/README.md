@@ -72,16 +72,19 @@ uv run python -u -m search_agent.viewer
 
 ## Training
 
-`search_agent/train.sh` runs GRPO with SkyRL on 8 GPUs: full fine-tuning, LR 3e-6, 64 queries x 8 rollouts per step,
-30,720-token context, eval on the 64 dev queries every 4 steps. It needs the `train` dependency group and the SkyRL
-v0.3.0 checkout described in `pyproject.toml`. Extra `key=value` arguments override its defaults; its header comments
-explain the settings and give a one-step smoke test.
+`search_agent/train.sh` runs GRPO with SkyRL on 8 GPUs, as Jasper's full run: full fine-tuning, LR 3e-6, 64 queries
+x 8 rollouts per step for 24 steps (1.5 epochs), 30,720-token context. Evals run at steps 0, 8, 16 and 24 on his
+held-out set: the first 32 dev queries x 4 samples, searched over the 124k-chunk ablation corpus
+(`outputs/search_agent/dev32_sec256.parquet`). It needs the `train` dependency group and the SkyRL v0.3.0 checkout
+described in `pyproject.toml`. Extra `key=value` arguments override its defaults; its header comments explain the
+settings and give a one-step smoke test.
 
 ```bash
-bash search_agent/train.sh trainer.run_name=<name>
+RUN_NAME=<name> bash search_agent/train.sh
 ```
 
-Checkpoints go to `outputs/search_agent/checkpoints`, TensorBoard logs to `outputs/search_agent/logs/tensorboard/<name>`:
+Checkpoints go to `outputs/search_agent/checkpoints/<name>`, eval dumps to `outputs/search_agent/exports/<name>`,
+TensorBoard logs to `outputs/search_agent/logs/tensorboard/<name>`:
 
 ```bash
 .venv/bin/tensorboard --logdir outputs/search_agent/logs/tensorboard

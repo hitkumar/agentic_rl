@@ -6,7 +6,8 @@ row runs `run_trajectory`, the same loop the evals use, with a sampler backed by
 engines instead of an HTTP server.
 
 The query and facts come from env_extras, the dataset's extra columns; the chat-format `prompt` column is unused,
-since the prompt is rendered with Harmony.
+since the prompt is rendered with Harmony. An optional `corpus` column picks the index the tools search (see
+run_trajectory), so evals can search a different corpus than training.
 """
 
 import asyncio
@@ -71,7 +72,12 @@ class SearchGenerator(GeneratorInterface):
             sampler = EngineSampler(self.client, sampling_params, session_id)
             try:
                 return await run_trajectory(
-                    sampler, self.tools, extras["query"], json.loads(extras["facts"]), self.context_length
+                    sampler,
+                    self.tools,
+                    extras["query"],
+                    json.loads(extras["facts"]),
+                    self.context_length,
+                    extras.get("corpus") or "",
                 )
             finally:
                 await self.client.finish_session(session_id)
