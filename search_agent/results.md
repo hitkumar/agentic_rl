@@ -10,10 +10,11 @@ Both datasets are identical to Jasper's (same query ids, query text, gold facts,
 | Full | 1,024 | 64 | 237,533 | [`data/`](data/) | `--train-size 1024 --dev-size 64` |
 | Ablation | 256 | 64 | 124,395 | [`data/sec_256/`](data/sec_256/) | `--train-size 256 --dev-size 64` (default) |
 
-The 64 dev queries are the same in both. The baseline and LR sweep evaluated on the first 32 (the sweep via
-`outputs/search_agent/dev32.parquet`); `train.sh` evaluates on all 64. So the full run's step-0 score is not comparable
-to 0.283: more queries and a larger corpus. The code reads `data/`, so to use the ablation set, swap its files into
-`data/`. The baseline, overfit check and LR sweep below used the ablation set.
+The 64 dev queries are the same in both. The baseline, LR sweep and full run evaluate on the first 32, searched over
+the ablation corpus, as Jasper's held-out eval (the sweep via `outputs/search_agent/dev32.parquet`, the full run via
+`dev32_sec256.parquet`, which points its episodes at `data/sec_256/` while training uses `data/`). Otherwise the code
+reads `data/`, so to train or run baselines on the ablation set, swap its files into `data/`. The baseline, overfit
+check and LR sweep below used the ablation set.
 
 ## Baseline: gpt-oss-20b before training (Jasper's "Initial explorations")
 
@@ -156,3 +157,58 @@ Conclusions:
   3e-6 should be watched for falling turns.
 - The full run uses 3e-6, now `train.sh`'s default, with 64 queries per step instead of 32. The LR was tuned at 32;
   the larger batch should only make steps less noisy, but that is untested.
+
+## Full run: 1,024 queries, LR 3e-6
+
+TLDR: training works at full scale. Held-out F1 rose from 0.256 to 0.438 and reward (F4) from 0.131 to 0.424 over 24
+steps, above Jasper's plain-F4 run (F4 0.316) and level with his best recipe, F4 plus a format penalty (0.418 at step
+24). Side effect: the model stopped calling `finish`; 99% of eval episodes end with a plain reply.
+
+Setup, as Jasper's full run: 1,024 train queries over the 237,533-chunk corpus, 64 queries x 8 rollouts per step for 24
+steps (1.5 epochs), LR 3e-6, full fine-tuning, otherwise as the LR sweep. Eval at steps 0, 8, 16 and 24 on his
+held-out set: the first 32 dev queries x 4 samples (128 rollouts), searched over the 124,395-chunk ablation corpus.
+Run `full_lr3e-6`, launched by `RUN_NAME=full_lr3e-6 bash search_agent/train.sh`; about 10 hours on 8x A100.
+
+Eval, mean over the 128 eval rollouts. Reward is F4. Base model (step 0): F1 0.256, reward 0.131.
+
+| Run | step 8: F1, reward | step 16: F1, reward | step 24: F1, reward |
+|---|---|---|---|
+| ours, LR 3e-6 | 0.251, 0.213 | 0.368, 0.350 | **0.438, 0.424** |
+| Jasper, plain F4 (blog F1, repo F4) | 0.245, – | 0.253, 0.202 | 0.302, 0.316 |
+| Jasper, F4 + format penalty (repo F4) | – | –, 0.353 | –, 0.418 |
+
+Jasper's base model: F1 0.195 (blog), F4 0.166 (repo). His repo F4 is the mean of two evals of 32 queries x 1 sample.
+
+Eval behaviour:
+
+| | step 0 | step 8 | step 16 | step 24 |
+|---|---|---|---|---|
+| turns | 18.7 | 19.2 | 27.1 | 23.9 |
+| nothing curated | 0.39 | 0.02 | 0.03 | 0.00 |
+| ended by `finish` | 0.56 | 0.87 | 0.68 | 0.01 |
+| ended by plain reply (no tool call) | 0.09 | 0.11 | 0.20 | 0.99 |
+| ended by malformed tool call | 0.11 | 0.02 | 0.00 | 0.00 |
+
+Train reward by step (64 queries x 8 rollouts each, a different batch every step):
+
+| Step | 1 | 4 | 8 | 12 | 16 | 20 | 23 | 24 |
+|---|---|---|---|---|---|---|---|---|
+| reward | 0.041 | 0.163 | 0.184 | 0.288 | 0.254 | 0.342 | 0.419 | 0.366 |
+
+Conclusions:
+
+- Training went in three phases. Steps 1–8: the model stopped curating nothing (eval 0.39 → 0.02), which lifted
+  reward but not F1; among episodes that curated something, F4 fell, because queries it used to give up on now get
+  weak guesses. Steps 8–12: episodes got longer (train turns 17.5 → 26). Steps 12–24: it found more gold chunks, and
+  held-out F1 rose 0.25 → 0.44.
+- The F1 gain over the base model (0.182) is about four times the eval noise (0.047); the reward gain (0.293) is
+  well beyond its 0.053.
+- The two base models score about the same: ours is higher on F1 (0.249–0.283 across three evals, against 0.195) and
+  lower on F4 (0.120–0.158, against 0.166), both gaps near eval noise. One harness difference may favour his base F4,
+  untested: his parser runs tool calls with malformed headers, ours ends the episode, often before anything is
+  curated.
+- Plain F4 scores an episode the same however it ends, so nothing kept `finish`: plain-reply endings went from 0.09 to
+  0.99. The next run adds a format penalty for any episode that does not end with a well-formed `finish` call.
+- The trainer vs vLLM logprob diff rose slowly from 0.026 to 0.035 over the run, with no collapse (turns, reward and
+  malformed calls stayed healthy).
+- One training run, one seed; run-to-run variance is not measured.
