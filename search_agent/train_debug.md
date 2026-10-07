@@ -1,8 +1,10 @@
 # train.sh debugging log
 
 Goal: GRPO training of gpt-oss-20b with SkyRL v0.3.0 on 8x A100, with training (FSDP over 8 GPUs) and vLLM (2 engines x
-TP4) colocated. Status: trains and learns (see the overfit check in results.md). Eval, checkpointing and resume are not
-yet tested.
+TP4) colocated. Status: trains and learns (see the overfit check and LR sweep in results.md). Eval and saving and
+loading checkpoints work. Resume does not continue training yet: in a test with 1 step per epoch, a run resumed from
+step 1 with `epochs=2` loaded the checkpoint, ran eval and exited without training step 2. A likely cause, untested:
+SkyRL restores the dataloader at the end of epoch 1, so epoch 2 iterates no batches. Resuming mid-epoch is not tested.
 
 Key fixes, for anyone setting this up again or upgrading SkyRL, vLLM or transformers. Smaller compatibility shims are
 commented in `skyrl_patches.py`.

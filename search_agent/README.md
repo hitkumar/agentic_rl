@@ -18,9 +18,12 @@ Based on Jasper Lu's [Training search agents with GRPO](https://jasperlu.com/blo
 - **Format penalty:** gpt-oss drifted into malformed Harmony tool calls (99% of episodes); a -0.1 penalty cut them to
   under 1% and lifted F1 to 0.36 (recall 0.43), peaking at 0.39.
 
+This repo trains the same model on the same data with full fine-tuning in SkyRL on 8x A100, instead of a LoRA on
+Tinker. Results are in [results.md](results.md); setup problems and their fixes in [train_debug.md](train_debug.md).
+
 ## Data
 
-Run from the repo root.
+Run everything from the repo root.
 
 Install dependencies:
 
@@ -35,11 +38,15 @@ the RL training splits `search_agent/data/train.parquet` and `search_agent/data/
 uv run python -u search_agent/prepare_data.py
 ```
 
+The defaults build the 256-query ablation set; add `--train-size 1024` for the full set (see results.md).
+
 Build the BM25 search index `search_agent/data/index.sqlite3` used by the search tools in `search_agent/retrieval.py`:
 
 ```bash
 uv run python -u search_agent/retrieval.py
 ```
+
+## Eval
 
 Serve gpt-oss-20b with vLLM on one GPU (ready in about 3.5 minutes), then run the agent on dev queries with `search_agent/trajectory.py`. Both need the `train` dependency group:
 
@@ -48,5 +55,38 @@ uv sync --locked --group train
 CUDA_VISIBLE_DEVICES=0 .venv/bin/vllm serve unsloth/gpt-oss-20b-BF16 --dtype bfloat16 --max-model-len 65536 --gpu-memory-utilization 0.85 --port 8000
 uv run python -u -m search_agent.trajectory --limit 8
 ```
+
+The baseline in results.md is 4 trials on each of the first 32 dev queries; `--output` saves every rollout with its
+transcript:
+
+```bash
+uv run python -u -m search_agent.trajectory --limit 32 --samples 4 --context-length 30720 \
+  --output search_agent/data/rollouts/<name>.jsonl
+```
+
+Browse saved rollouts in the viewer, then open http://localhost:8081:
+
+```bash
+uv run python -u -m search_agent.viewer
+```
+
+## Training
+
+`search_agent/train.sh` runs GRPO with SkyRL on 8 GPUs: full fine-tuning, LR 3e-6, 64 queries x 8 rollouts per step,
+30,720-token context, eval on the 64 dev queries every 4 steps. It needs the `train` dependency group and the SkyRL
+v0.3.0 checkout described in `pyproject.toml`. Extra `key=value` arguments override its defaults; its header comments
+explain the settings and give a one-step smoke test.
+
+```bash
+bash search_agent/train.sh trainer.run_name=<name>
+```
+
+Checkpoints go to `outputs/search_agent/checkpoints`, TensorBoard logs to `outputs/search_agent/logs/tensorboard/<name>`:
+
+```bash
+.venv/bin/tensorboard --logdir outputs/search_agent/logs/tensorboard
+```
+
+Resuming from a checkpoint does not continue training yet; see train_debug.md.
 
 Put exploration notebooks in `search_agent/notebooks/`; the folder is gitignored, so they stay local.

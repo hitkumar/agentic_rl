@@ -1,5 +1,20 @@
 # Results
 
+## Data
+
+Both datasets are identical to Jasper's (same query ids, query text, gold facts, chunk ids and chunk text), built with
+`prepare_data.py` (seed 42) and gitignored:
+
+| Dataset | Train queries | Dev queries | Corpus chunks | Location | Built with |
+|---|---|---|---|---|---|
+| Full | 1,024 | 64 | 237,533 | [`data/`](data/) | `--train-size 1024 --dev-size 64` |
+| Ablation | 256 | 64 | 124,395 | [`data/sec_256/`](data/sec_256/) | `--train-size 256 --dev-size 64` (default) |
+
+The 64 dev queries are the same in both. The baseline and LR sweep evaluated on the first 32 (the sweep via
+`outputs/search_agent/dev32.parquet`); `train.sh` evaluates on all 64. So the full run's step-0 score is not comparable
+to 0.283: more queries and a larger corpus. The code reads `data/`, so to use the ablation set, swap its files into
+`data/`. The baseline, overfit check and LR sweep below used the ablation set.
+
 ## Baseline: gpt-oss-20b before training (Jasper's "Initial explorations")
 
 ### Setup
@@ -94,10 +109,50 @@ fine-tuning of `unsloth/gpt-oss-20b-BF16` on 8x A100, 30,720-token context. Run:
 - The logprob diff sits at Mercor's "below 0.03 is healthy" mark and doesn't grow, so weight sync is sound.
 - More episodes end with a plain reply instead of `finish`. That scores the same as `finish`, so it isn't penalized.
 
-Fixes that made the run possible (all in `skyrl_patches.py` except the tool pool):
+## LR sweep: 1e-6, 3e-6, 1e-5
 
-| Problem | Fix | Effect |
-|---|---|---|
-| Attention backward ~180x slower with gpt-oss's attention sinks in SkyRL's flex attention | Compute attention without sinks, then apply them from the logsumexp | Training step practical at 30k tokens |
-| Tool calls ran on the event loop shared by all 256 episodes, stalling generation | Run them in a pool of 32 processes (`trajectory.tool_pool`) | Step-1 generation 818 s → 507 s |
-| Out of memory at step 3: SkyRL loads the 21 GB/GPU Adam state before the forward and backward passes | Load it just before the optimizer step | Peak fits; 30.9k-token sequences train with Adam state allocated |
+TLDR: use 3e-6. It has the highest eval reward from step 4 on (0.258 at step 6, base 0.158) and is the only LR that
+stopped curating nothing without collapsing; its F1 gain (0.283 → 0.324) is within eval noise. 1e-6 barely moved;
+1e-5 collapsed to ~5-turn episodes with F1 0.11.
+
+Setup, as Jasper's sweep: one epoch of the 256 train queries, 32 queries x 8 rollouts per step (8 steps), full
+fine-tuning, otherwise as the overfit check. Eval every 2 steps on the 32 eval queries x 4 samples (128 rollouts).
+Runs `lr_1.0e-6`, `lr_3.0e-6`, `lr_1.0e-5`, launched by `outputs/search_agent/lr_sweep/run.sh`.
+
+Eval, mean over the 128 eval rollouts. Reward is F4. Base model: F1 0.283, reward 0.158.
+
+| LR | step 2: F1, reward | step 4: F1, reward | step 6: F1, reward | step 8: F1, reward |
+|---|---|---|---|---|
+| 1e-6 | 0.242, 0.125 | 0.287, 0.166 | 0.265, 0.163 | 0.228, 0.119 |
+| 3e-6 | 0.236, 0.130 | 0.295, 0.226 | **0.324, 0.258** | 0.290, 0.252 |
+| 1e-5 | 0.163, 0.129 | 0.126, 0.103 | 0.119, 0.129 | 0.108, 0.144 |
+
+Eval behaviour at step 8:
+
+| | base | 1e-6 | 3e-6 | 1e-5 |
+|---|---|---|---|---|
+| turns | 19.2 | 13.2 | 20.0 | 5.2 |
+| ended by `finish` | 0.58 | 0.67 | 0.90 | 0.95 |
+| nothing curated | 0.32 | 0.34 | 0.01 | 0.02 |
+| trainer vs vLLM logprob diff, max over training | | 0.028 | 0.029 | 0.033 |
+
+- 3e-6 learned to search and then curate: nothing-curated fell from 0.32 to 0.01 while turns stayed ~20.
+- 1e-5 stopped searching (~1.6 searches per episode at step 4, against ~6 at 3e-6) and curated worse chunks. Its
+  logprob diff passed 0.03 at steps 4–6.
+- 3e-6 train reward fell over the last three steps (0.236 → 0.135) while eval held; 1e-6 also dropped on the last
+  batch. Possibly harder batches, but untested; the cause is unknown.
+
+Conclusions:
+
+- 3e-6 is the best of the three. Its reward leads at steps 4, 6 and 8 (0.226–0.258, against at most 0.166 for the
+  others), and nothing-curated fell from 0.32 to 0.01. Its reward lead is beyond eval noise at steps 6 and 8 and
+  borderline at step 4; the fall in nothing-curated is well beyond it.
+- Most of the reward gain is the model learning not to curate nothing, which scores -0.2. That is real learning, but
+  F1 has not yet clearly improved.
+- Eval noise: two evals of the same model differ by up to 0.047 F1 (95th percentile, from resampling the two
+  base-model evals). The base model scored 0.249 in ours-30k and 0.283 here; same queries, prompt and sampling, so
+  the gap is sampling noise. 3e-6's F1 gain over the base model (0.041) is below that bound.
+- Not tested: stability past 8 steps, and LRs between 3e-6 and 1e-5. 1e-5 broke within 2–4 steps, so a long run at
+  3e-6 should be watched for falling turns.
+- The full run uses 3e-6, now `train.sh`'s default, with 64 queries per step instead of 32. The LR was tuned at 32;
+  the larger batch should only make steps less noisy, but that is untested.

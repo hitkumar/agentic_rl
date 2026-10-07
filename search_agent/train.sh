@@ -5,7 +5,7 @@
 # Based on SkyRL's gpt-oss example (examples/train/gptoss/run_gsm8k_gptoss.sh). Follows Jasper's run where it applies:
 # 64 queries x 8 rollouts per step, advantages centered within each group (no std normalization), no KL. He trained a
 # LoRA with LR 1e-4; this is full fine-tuning (SkyRL's LoRA for gpt-oss would skip the MoE experts), so the LR is
-# SkyRL's 1e-6.
+# 3e-6, the best of the LR sweep in results.md.
 #
 # The loss matches Tinker's importance_sampling loss, which he used: -sum over generated tokens of
 # (p_theta / q_sampler) * advantage, summed over tokens rather than averaged. rollout_is has the same gradient; the clip
@@ -78,7 +78,7 @@ export RAY_ADDRESS=auto
   trainer.algorithm.eps_clip_high=1.0e9 \
   trainer.algorithm.loss_reduction=seq_mean_token_sum_norm \
   trainer.algorithm.max_seq_len=$CONTEXT_LENGTH \
-  trainer.policy.optimizer_config.lr=1.0e-6 \
+  trainer.policy.optimizer_config.lr=3.0e-6 \
   trainer.train_batch_size=64 \
   trainer.policy_mini_batch_size=64 \
   trainer.micro_forward_batch_size_per_gpu=1 \
