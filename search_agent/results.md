@@ -162,7 +162,8 @@ Conclusions:
 
 TLDR: training works at full scale. Held-out F1 rose from 0.256 to 0.438 and reward (F4) from 0.131 to 0.424 over 24
 steps, above Jasper's plain-F4 run (F4 0.316) and level with his best recipe, F4 plus a format penalty (0.418 at step
-24). Side effect: the model stopped calling `finish`; 99% of eval episodes end with a plain reply.
+24). Side effect: its `finish` calls broke; 99% of eval episodes end with a plain reply after repeated failed
+`finish` calls.
 
 Setup, as Jasper's full run: 1,024 train queries over the 237,533-chunk corpus, 64 queries x 8 rollouts per step for 24
 steps (1.5 epochs), LR 3e-6, full fine-tuning, otherwise as the LR sweep. Eval at steps 0, 8, 16 and 24 on his
@@ -207,8 +208,76 @@ Conclusions:
   lower on F4 (0.120–0.158, against 0.166), both gaps near eval noise. One harness difference may favour his base F4,
   untested: his parser runs tool calls with malformed headers, ours ends the episode, often before anything is
   curated.
-- Plain F4 scores an episode the same however it ends, so nothing kept `finish`: plain-reply endings went from 0.09 to
-  0.99. The next run adds a format penalty for any episode that does not end with a well-formed `finish` call.
+- Its `finish` calls broke: from step 8 the model calls `finish` about 6 times per episode with arguments that are
+  not valid JSON (mostly `{""}`), which our harness rejected at no cost, then ends with a plain reply (0.09 → 0.99).
+  Plain F4 scores every ending the same, so nothing pushed back. Jasper's harness ends such an episode at -0.2; the
+  next run adopts that rule.
 - The trainer vs vLLM logprob diff rose slowly from 0.026 to 0.035 over the run, with no collapse (turns, reward and
   malformed calls stayed healthy).
 - One training run, one seed; run-to-run variance is not measured.
+
+## Format penalty and Jasper's harness rules
+
+TLDR: the fixes made the model end cleanly at no cost to search quality. At step 24, 98% of eval episodes end with a
+successful `finish` call (previous run: 1%) and 1% have an off-form tool-call header (98%); held-out F1 and reward
+match the previous run within eval noise (0.448 vs 0.438, 0.430 vs 0.424), level with Jasper's format-penalty run
+(F4 0.418). Unlike his, the penalty did not raise recall.
+
+Setup: as the previous run (`full_lr3e-6`), with two changes:
+
+- Harness, matching Jasper's: an episode ends at a flat -0.2, curated set unscored, when a tool call's arguments are
+  not valid JSON (e.g. `finish` with `{""}`) or a reply is cut off at 2,048 tokens; unknown argument keys are dropped.
+  This applies to evals too.
+- Format penalty (training only): -0.1, once per episode, if any tool call's header is not the canonical
+  `<|channel|>commentary to=functions.X <|constrain|>json<|message|>`. Eval rewards stay F4 without it.
+
+Run `base_format_base_fp_harness`, launched by
+`RUN_NAME=base_format_base_fp_harness bash search_agent/train.sh search.format_penalty=0.1`; about 11 hours.
+
+Eval, mean over the 128 eval rollouts. Base model (step 0): F1 0.256, reward 0.131 in the previous run; F1 0.271,
+reward 0.044 in this one, lower on reward because invalid-JSON and cut-off episodes now score -0.2.
+
+| Run | step 8: F1, reward | step 16: F1, reward | step 24: F1, reward |
+|---|---|---|---|
+| previous run (plain F4, old harness) | 0.251, 0.213 | 0.368, 0.350 | 0.438, 0.424 |
+| this run (format penalty, Jasper's harness rules) | 0.284, 0.230 | 0.385, 0.345 | **0.448, 0.430** |
+| Jasper, plain F4 (blog F1, repo F4) | 0.21, – | 0.23, 0.202 | 0.33, 0.316 |
+| Jasper, F4 + format penalty (blog F1, repo F4) | 0.24, – | 0.34, 0.353 | 0.36, 0.418 |
+
+Jasper's F1 here is from his format-penalty F1 chart, which plots both of his runs.
+
+Eval at step 24. Endings: share of episodes ending with a successful `finish`, a plain reply, or invalid JSON (-0.2);
+off-form: share of episodes with any off-form tool-call header.
+
+| Run | precision | recall | `finish` | plain reply | invalid JSON | off-form | nothing curated | turns |
+|---|---|---|---|---|---|---|---|---|
+| previous run | 0.477 | 0.423 | 0.01 | 0.99 | – | 0.98 | 0.00 | 23.9 |
+| this run | 0.487 | 0.433 | 0.98 | 0.00 | 0.02 | 0.01 | 0.02 | 18.7 |
+
+Training, this run (64 queries x 8 rollouts per step):
+
+| Step | 1 | 4 | 8 | 12 | 16 | 20 | 24 |
+|---|---|---|---|---|---|---|---|
+| reward (with penalties) | -0.076 | 0.126 | 0.147 | 0.288 | 0.289 | 0.397 | 0.357 |
+| episodes with off-form header | 0.52 | 0.15 | 0.38 | 0.05 | 0.01 | 0.00 | 0.01 |
+| ended by invalid JSON | 0.19 | 0.01 | 0.01 | 0.02 | 0.02 | 0.02 | 0.01 |
+| ended by `finish` | 0.29 | 0.82 | 0.95 | 0.91 | 0.92 | 0.97 | 0.98 |
+
+Conclusions:
+
+- The two fixes address different failures. The invalid-JSON rule fixed the broken `finish` calls within two steps
+  (invalid-JSON endings 0.19 → 0.01), because a broken call now costs the whole episode. The format penalty fixed the
+  headers more slowly and unevenly: off-form episodes fell to 0.15 by step 4, rebounded to 0.47 at step 7, then fell
+  to about 0.01 from step 16.
+- Search quality is unchanged within eval noise (0.047 F1). On the same training batches (both runs see the same
+  batch at each step), training F1 is equal over steps 1–8 and higher in this run over steps 9–24 (+0.03 to +0.05),
+  converging by step 24. Training reward is lower over steps 1–8 only because the penalties apply.
+- Unlike Jasper's runs, the penalty did not raise recall (+0.01 here, +0.11 for him). Our previous run already reached
+  0.42 recall, his format-penalty level; his plain run stopped at 0.32. Format drift did not hurt our plain run.
+- Episodes are shorter (18 turns against 24–28 at the end of the previous run), mostly because the previous run spent
+  about 6 turns per episode on failed `finish` calls. Jasper's format-penalty run instead rose to 28–30 turns.
+- About 1–2% of episodes still end on invalid JSON, mostly malformed search arguments (single quotes, text after the
+  closing brace); Jasper's format-penalty run keeps a similar floor (96–97% valid episodes).
+- The trainer vs vLLM logprob diff stayed at 0.027–0.029 (previous run: rose to 0.035), and entropy stayed near 0.95
+  through step 16 before falling to 0.79 (previous run: 0.65 by step 6).
+- One run, one seed.
