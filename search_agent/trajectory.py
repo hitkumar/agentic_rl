@@ -1,15 +1,18 @@
 """One search episode: gpt-oss-20b calls the search tools until it finishes, token IDs in and out.
 
-Adapted from jasper-lu/sec-search-rl (src/sec_rl/environment.py), without its harness extras (parse-failure retries,
-context nudges, reward penalties).
+Adapted from jasper-lu/sec-search-rl (src/sec_rl/environment.py). Not ported: his off-by-default penalties
+(unfinished episodes, invalid curations), the f4s trajectory-recall reward, and his lenient tool-call parser; the
+system message is gpt-oss's standard one, not his tool-routing line only.
 
 Each turn samples one assistant reply, which stops at its tool call (<|call|>); gpt-oss makes one call per turn. The
 call runs against SearchTools, its result is appended as a Harmony tool message, and the next turn samples from the
 extended token sequence. Sampled tokens are appended exactly as returned, never re-rendered: Harmony renders some
 headers differently from how the model writes them, and training must see the tokens that were sampled.
 
-The episode ends when the model calls finish, replies without a tool call, or runs out of turns or context. The
-curated set is scored either way.
+The episode ends when the model calls finish, replies without a tool call, or runs out of turns or context; the
+curated set is scored. As in Jasper's harness, a turn the harness cannot use ends the episode at a flat EMPTY_REWARD
+(-0.2) instead, curated set unscored: a tool call whose arguments are not valid JSON (e.g. finish with {""}), or a
+reply cut off at MAX_GENERATION_TOKENS. Unknown argument keys are dropped, as his tool validation does.
 
 Run the dev queries against a vLLM server (see search_agent/README.md to start one):
   uv run python -u -m search_agent.trajectory --limit 8
@@ -22,6 +25,7 @@ import argparse
 import asyncio
 import json
 import multiprocessing
+import re
 from collections import Counter
 from concurrent.futures import Executor, ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -47,7 +51,7 @@ from openai_harmony import (
 
 from search_agent.prompts import SYSTEM_PROMPT
 from search_agent.retrieval import DATA_DIR, Index
-from search_agent.rewards import Score, reward, score
+from search_agent.rewards import EMPTY_REWARD, Score, reward, score
 from search_agent.tools import TOOL_SPECS, SearchTools, Session
 
 MAX_TURNS = 40
@@ -59,11 +63,17 @@ TOOL_PROCESSES = 32
 
 TOOLS = [ToolDescription.new(**spec) for spec in TOOL_SPECS]
 TOOL_NAMES = {spec["name"] for spec in TOOL_SPECS}
+TOOL_PARAMETERS = {spec["name"]: set(spec["parameters"]["properties"]) for spec in TOOL_SPECS}
+# Stop reasons for turns the harness cannot use; the episode scores a flat EMPTY_REWARD (see the module docstring).
+BROKEN_TURN_ENDINGS = ("invalid_json", "truncated")
 
 ENCODING = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 # <|call|> ends a tool call, <|return|> a final answer.
 STOP_TOKEN_IDS = ENCODING.stop_tokens_for_assistant_actions()
 ASSISTANT_START = ENCODING.encode("<|start|>assistant", allowed_special="all")
+# The one header form Harmony renders for a tool call, as in Jasper's environment.py. The model also writes others
+# (e.g. "code" instead of "<|constrain|>json"), which run_tool still executes.
+CANONICAL_TOOL_HEADER = re.compile(r"<\|channel\|>commentary to=functions\.[a-z0-9_]+ <\|constrain\|>json<\|message\|>")
 
 
 @dataclass
@@ -113,11 +123,17 @@ class Trajectory:
     loss_mask: list[int] = field(default_factory=list)
     # Sampler logprobs for sampled tokens, 0.0 for tool results.
     logprobs: list[float] = field(default_factory=list)
-    # One of: finish, no_tool_call, parse_error, truncated, context_full, max_turns.
+    # One of: finish, no_tool_call, parse_error, invalid_json, truncated, context_full, max_turns.
     stop_reason: str = "max_turns"
     turns: int = 0
     session: Session = field(default_factory=Session)
     reward: float = 0.0
+    # Tool-call headers in the sampled turns, and those not in the canonical form.
+    call_headers: int = 0
+    off_format_calls: int = 0
+    # Executed tool calls whose observation is an error, and those of them to finish.
+    failed_tool_calls: int = 0
+    failed_finish_calls: int = 0
 
 
 def render_prompt(query: str) -> list[int]:
@@ -161,6 +177,7 @@ def run_tool(tools: SearchTools, recipient: str, arguments: str) -> dict:
         return {"error": f"Arguments are not valid JSON: {exc}"}
     if not isinstance(kwargs, dict):
         return {"error": "Arguments must be a JSON object."}
+    kwargs = {key: value for key, value in kwargs.items() if key in TOOL_PARAMETERS[name]}
     try:
         return getattr(tools, name)(**kwargs)
     except TypeError as exc:
@@ -190,11 +207,16 @@ async def run_trajectory(
             break
         sample = await sampler(trajectory.prompt_ids + trajectory.response_ids, max_tokens)
         trajectory.turns += 1
+        text = ENCODING.decode(sample.token_ids)
+        trajectory.call_headers += text.count("to=functions.")
+        trajectory.off_format_calls += text.count("to=functions.") - len(CANONICAL_TOOL_HEADER.findall(text))
         trajectory.response_ids += sample.token_ids
         trajectory.loss_mask += [1] * len(sample.token_ids)
         trajectory.logprobs += sample.logprobs
         if sample.finish_reason == "length":
-            trajectory.stop_reason = "truncated"
+            # Cut off by the context limit rather than the per-turn cap: scored, as Jasper's harness ends the episode
+            # before a turn that may not fit and scores it.
+            trajectory.stop_reason = "truncated" if max_tokens == MAX_GENERATION_TOKENS else "context_full"
             break
         try:
             reply = ENCODING.parse_messages_from_completion_tokens(sample.token_ids, Role.ASSISTANT)
@@ -207,9 +229,17 @@ async def run_trajectory(
         if not recipient.startswith("functions.") or not isinstance(content, TextContent):
             trajectory.stop_reason = "no_tool_call"
             break
+        try:
+            json.loads(content.text)
+        except json.JSONDecodeError:
+            trajectory.stop_reason = "invalid_json"
+            break
         observation, trajectory.session = await loop.run_in_executor(
             tools, run_tool_in_pool, trajectory.session, corpus, recipient, content.text
         )
+        if "error" in observation:
+            trajectory.failed_tool_calls += 1
+            trajectory.failed_finish_calls += recipient == "functions.finish"
         if trajectory.session.finished:
             trajectory.stop_reason = "finish"
             break
@@ -224,7 +254,10 @@ async def run_trajectory(
         trajectory.response_ids += tool_ids
         trajectory.loss_mask += [0] * len(tool_ids)
         trajectory.logprobs += [0.0] * len(tool_ids)
-    trajectory.reward = reward(trajectory.session.curated_ids, facts)
+    if trajectory.stop_reason in BROKEN_TURN_ENDINGS:
+        trajectory.reward = EMPTY_REWARD
+    else:
+        trajectory.reward = reward(trajectory.session.curated_ids, facts)
     return trajectory
 
 

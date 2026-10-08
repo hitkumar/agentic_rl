@@ -25,6 +25,10 @@
 #     trainer.train_batch_size=4 trainer.policy_mini_batch_size=4 generator.n_samples_per_prompt=4 trainer.epochs=1 \
 #     trainer.eval_before_train=false trainer.eval_interval=-1 trainer.ckpt_interval=-1
 #
+# search.format_penalty=0.1 turns on Jasper's format penalty: a training trajectory with any off-form tool-call
+# header gets reward - 0.1 (default 0, off; eval rewards stay plain F4). train.py handles it, not SkyRL, e.g.
+#   RUN_NAME=f4_fmt bash search_agent/train.sh search.format_penalty=0.1
+#
 # A Hugging Face copy of the model (servable with vllm serve, for evals with trajectory.py) is saved at the end of
 # each epoch and of training, under outputs/search_agent/exports/<run>/global_step_<N>/policy. SkyRL saves it at every
 # epoch end and every hf_save_interval steps, so hf_save_interval is the steps per epoch (train queries / batch size).
@@ -56,6 +60,9 @@ export FLASHINFER_CUDA_ARCH_LIST=8.0
 # Same for transformers, which calls torch.cuda.is_available() when the Ray setup hook imports gpt-oss: by default
 # that initializes CUDA. This makes torch check through NVML instead, which doesn't.
 export PYTORCH_NVML_BASED_CUDA_CHECK=1
+# The Hugging Face export gathers the full fp32 model on rank 0 and writes it (about 84 GB, 8-10 minutes) while the
+# other ranks wait at a barrier; SkyRL's default 10-minute process-group timeout then fails the export.
+export SKYRL_WORKER_NCCL_TIMEOUT_IN_S=3600
 .venv/bin/ray start --head --node-ip-address=127.0.0.2 --include-dashboard=false --disable-usage-stats
 trap '.venv/bin/ray stop' EXIT
 export RAY_ADDRESS=auto

@@ -83,6 +83,9 @@ settings and give a one-step smoke test.
 RUN_NAME=<name> bash search_agent/train.sh
 ```
 
+Add `search.format_penalty=0.1` to subtract 0.1 from a training trajectory's reward when any of its tool calls has an
+off-form Harmony header, as in Jasper's format-penalty run (off by default; eval rewards stay plain F4).
+
 Checkpoints go to `outputs/search_agent/checkpoints/<name>`, eval dumps to `outputs/search_agent/exports/<name>`,
 TensorBoard logs to `outputs/search_agent/logs/tensorboard/<name>`:
 

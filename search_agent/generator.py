@@ -8,6 +8,10 @@ engines instead of an HTTP server.
 The query and facts come from env_extras, the dataset's extra columns; the chat-format `prompt` column is unused,
 since the prompt is rendered with Harmony. An optional `corpus` column picks the index the tools search (see
 run_trajectory), so evals can search a different corpus than training.
+
+With format_penalty p > 0, a training trajectory with any off-form tool-call header gets reward - p, once per
+trajectory, as in Jasper's format-penalty run; not on the flat -0.2 of an unusable turn (BROKEN_TURN_ENDINGS), as
+his harness skips the reward there. Eval rewards stay plain F4, so they compare across runs.
 """
 
 import asyncio
@@ -19,7 +23,14 @@ from skyrl.train.generators.base import GeneratorInput, GeneratorInterface, Gene
 from skyrl.train.generators.utils import get_rollout_metrics
 
 from search_agent.rewards import score
-from search_agent.trajectory import STOP_TOKEN_IDS, Sample, Trajectory, run_trajectory, tool_pool
+from search_agent.trajectory import (
+    BROKEN_TURN_ENDINGS,
+    STOP_TOKEN_IDS,
+    Sample,
+    Trajectory,
+    run_trajectory,
+    tool_pool,
+)
 
 
 class EngineSampler:
@@ -57,9 +68,12 @@ class EngineSampler:
 
 
 class SearchGenerator(GeneratorInterface):
-    def __init__(self, inference_engine_client: InferenceEngineInterface, context_length: int):
+    def __init__(
+        self, inference_engine_client: InferenceEngineInterface, context_length: int, format_penalty: float = 0.0
+    ):
         self.client = inference_engine_client
         self.context_length = context_length
+        self.format_penalty = format_penalty
         self.tools = tool_pool()
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
@@ -87,16 +101,37 @@ class SearchGenerator(GeneratorInterface):
         )
 
         responses = [t.response_ids for t in trajectories]
-        rewards = [t.reward for t in trajectories]
+        metadata = input_batch["batch_metadata"]
+        penalty = self.format_penalty if metadata is not None and metadata.training_phase == "train" else 0.0
+        rewards = [
+            t.reward - penalty * (t.off_format_calls > 0 and t.stop_reason not in BROKEN_TURN_ENDINGS)
+            for t in trajectories
+        ]
         loss_masks = [t.loss_mask for t in trajectories]
         metrics = get_rollout_metrics(responses, rewards, loss_masks=loss_masks)
-        f1s = [
-            score(t.session.curated_ids, json.loads(e["facts"]), beta=1.0).f_beta
-            for t, e in zip(trajectories, env_extras)
+        scores = [
+            score(t.session.curated_ids, json.loads(e["facts"]), beta=1.0) for t, e in zip(trajectories, env_extras)
         ]
-        metrics["search/f1"] = sum(f1s) / len(f1s)
+        metrics["search/f1"] = sum(s.f_beta for s in scores) / len(scores)
+        metrics["search/precision"] = sum(s.precision for s in scores) / len(scores)
+        metrics["search/recall"] = sum(s.recall for s in scores) / len(scores)
+        # Trajectory recall (Jasper's candidate recall): the recall of every chunk the searches returned, curated or not.
+        metrics["search/trajectory_recall"] = sum(
+            score(list(t.session.seen_ids), json.loads(e["facts"]), beta=1.0).recall
+            for t, e in zip(trajectories, env_extras)
+        ) / len(trajectories)
         metrics["search/turns"] = sum(t.turns for t in trajectories) / len(trajectories)
         metrics["search/nothing_curated"] = sum(not t.session.curated_ids for t in trajectories) / len(trajectories)
+        # Format drift: share of tool-call headers not in the canonical form, share of trajectories with any, and failed
+        # tool calls (finish among them) per trajectory.
+        metrics["search/off_format_call_share"] = sum(t.off_format_calls for t in trajectories) / max(
+            sum(t.call_headers for t in trajectories), 1
+        )
+        metrics["search/off_format_trajectories"] = sum(t.off_format_calls > 0 for t in trajectories) / len(
+            trajectories
+        )
+        metrics["search/failed_tool_calls"] = sum(t.failed_tool_calls for t in trajectories) / len(trajectories)
+        metrics["search/failed_finish_calls"] = sum(t.failed_finish_calls for t in trajectories) / len(trajectories)
         for stop_reason, count in Counter(t.stop_reason for t in trajectories).items():
             metrics[f"search/stop_{stop_reason}"] = count / len(trajectories)
 
