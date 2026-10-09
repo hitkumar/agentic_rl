@@ -19,6 +19,7 @@ dev = [
     "pandas>=3.0.6",
     "pytest>=8.4",
     "ruff>=0.12",
+    "types-regex>=2026.9.29.20261005",
 ]
 train = [
     "httpx>=0.28.1",
