@@ -19,7 +19,7 @@ Based on Jasper Lu's [Training search agents with GRPO](https://jasperlu.com/blo
   under 1% and lifted F1 to 0.36 (recall 0.43), peaking at 0.39.
 
 This repo trains the same model on the same data with full fine-tuning in SkyRL on 8x A100, instead of a LoRA on
-Tinker. Results are in [results.md](results.md); setup problems and their fixes in [train_debug.md](train_debug.md).
+Tinker. Results are in [results.md](results.md); known issues and upgrade notes at the end of this file.
 
 ## Data
 
@@ -93,6 +93,25 @@ TensorBoard logs to `outputs/search_agent/logs/tensorboard/<name>`:
 .venv/bin/tensorboard --logdir outputs/search_agent/logs/tensorboard
 ```
 
-Resuming from a checkpoint does not continue training yet; see train_debug.md.
+Resuming from a checkpoint does not continue training yet; see below.
 
 Put exploration notebooks in `search_agent/notebooks/`; the folder is gitignored, so they stay local.
+
+## Known issues and upgrade notes
+
+Resume does not continue training. In a test with 1 step per epoch, a run resumed from step 1 with `epochs=2` loaded
+the checkpoint, ran eval and exited without training step 2. A likely cause, untested: SkyRL restores the dataloader
+at the end of epoch 1, so epoch 2 iterates no batches. Resuming mid-epoch is not tested.
+
+Fixes to recheck when upgrading SkyRL (v0.3.0), vLLM or transformers. Each is commented where it's made; smaller
+compatibility shims are commented in `skyrl_patches.py`.
+
+| Problem | Cause | Fix | Where |
+|---|---|---|---|
+| vLLM servers unreachable | Host has no IPv4, so Ray's node address is IPv6; SkyRL puts it unbracketed in URLs and binds the servers to IPv4 | Ray node address 127.0.0.2, added to `no_proxy` | train.sh |
+| Patches don't reach Ray workers, or crash them | Patches must run in every worker; importing SkyRL in a Ray setup hook crashes Ray | `skyrl_patches.py`, which doesn't import SkyRL, as the `worker_process_setup_hook` | train.py, skyrl_patches.py |
+| Both vLLM engines on GPUs 0-3 | vLLM assigns each worker its GPUs after start; our setup hook had already initialized CUDA, so the assignment had no effect | `PYTORCH_NVML_BASED_CUDA_CHECK=1`, `FLASHINFER_CUDA_ARCH_LIST=8.0` | train.sh |
+| Weight sync silently keeps the old MoE expert weights in vLLM | SkyRL wraps the sync in vLLM's layerwise reload, which vLLM's gpt-oss expert loader bypasses | No-op the layerwise reload | skyrl_patches.py |
+| Attention backward ~180x slower | SkyRL adds gpt-oss's attention sinks through a flex-attention score_mod, whose gradient is computed with atomic adds | Attention without sinks, then the sinks applied from the logsumexp | skyrl_patches.py |
+| Generation stalls | Tool calls ran on the one event loop shared by all episodes; threads contend for the GIL | Pool of 32 processes (`tool_pool`) | trajectory.py |
+| Out of memory in the backward pass on a 30k-token sequence | SkyRL loads the 21 GB/GPU Adam state before the forward and backward passes | Load it just before the optimizer step | skyrl_patches.py |

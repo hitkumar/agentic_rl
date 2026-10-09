@@ -2,12 +2,20 @@
 
 Experiments and training infrastructure for agentic reinforcement learning.
 
+## Projects
+
+- [`search_agent/`](search_agent/README.md): GRPO training of gpt-oss-20b as a search agent over SEC filings,
+  reproducing Jasper Lu's [Training search agents with GRPO](https://jasperlu.com/blog/training-search-agents-grpo/)
+  with full fine-tuning in SkyRL on 8x A100. Results in [search_agent/results.md](search_agent/results.md).
+- [Harbor](#harbor): agent benchmarks in task containers, with notes from the DGX Spark setup in
+  [harbor.md](harbor.md), and an exporter from Harbor trajectories to Hugging Face traces.
+
 ## Python environment
 
 This project follows [Prime-RL's environment pattern](https://github.com/PrimeIntellect-ai/prime-rl/blob/main/pyproject.toml):
 Python 3.12, uv dependency management, and an editable package under `src/`.
-The initial environment includes pytest and Ruff. Training dependencies will be
-added as the training and inference backends are chosen.
+Dependencies come in two groups besides the base set: `dev` (pytest, Ruff, pandas, ipykernel), installed by default,
+and `train` (SkyRL, vLLM, openai-harmony), used by `search_agent/` for its evals and training.
 
 With [uv installed](https://docs.astral.sh/uv/getting-started/installation/), run
 these commands from the project root:
@@ -42,10 +50,15 @@ Commit `pyproject.toml`, `uv.lock`, and `.python-version`; `.venv` and caches ar
 ignored. See [uv's project documentation](https://docs.astral.sh/uv/concepts/projects/layout/)
 for how these files work together.
 
-For GPU dependencies, select a compatible set of PyTorch, CUDA, vLLM, and any
-attention kernels for the target GPU and CPU architecture before adding them.
-Prime-RL defines its own CUDA indexes, wheel URLs, and dependency overrides, so
-its full dependency list needs review before reusing it in this project.
+The `train` group installs SkyRL from a local checkout of its v0.3.0 release, not PyPI, and mirrors SkyRL's CUDA
+wheel indexes and overrides (Linux, x86_64 only). Clone it once before syncing the group:
+
+```bash
+git clone --branch skyrl-v0.3.0 https://github.com/NovaSky-AI/SkyRL ~/oss/SkyRL-v0.3.0
+uv sync --locked --group train
+```
+
+`pyproject.toml` comments explain the pins; re-sync them from SkyRL's `pyproject.toml` when bumping it.
 
 ## Harbor
 
