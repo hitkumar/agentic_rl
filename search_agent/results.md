@@ -281,3 +281,67 @@ Conclusions:
 - The trainer vs vLLM logprob diff stayed at 0.027–0.029 (previous run: rose to 0.035), and entropy stayed near 0.95
   through step 16 before falling to 0.79 (previous run: 0.65 by step 6).
 - One run, one seed.
+
+## Excerpt fix: snippets placed where the query matches
+
+TLDR: the excerpts `bm25_search` showed were mostly the first 220 characters of each chunk, not the part that matched,
+so the model rarely opened correct chunks it had found. Placing them where the query words cluster raised held-out F1
+from 0.448 to 0.558 and reward from 0.430 to 0.551 at step 24, the best run so far. Most of the gain needs no training:
+the previous run's step-24 checkpoint scores 0.568 with fixed excerpts alone.
+
+The fix: `bm25_search` used to start each excerpt at the earliest occurrence of any query word in the chunk, usually a
+word like "and" near the start, as in Jasper's harness. It now starts it where the most distinct query words fall
+within 220 characters, matching whole words and skipping stopwords (`retrieval.snippet_start`). Excerpt length is
+unchanged. Our results no longer compare directly with Jasper's from here on.
+
+### Eval-only test, no training
+
+The previous run's (`base_format_base_fp_harness`) step-24 checkpoint, evaluated on the same 32 queries x 4 samples
+with each excerpt version, both through `trajectory.py`. Facts found: a gold chunk appeared in a search result; opened:
+one was read with `read_document`.
+
+| | F1 | reward | facts found | facts opened | found but never opened |
+|---|---|---|---|---|---|
+| old excerpts | 0.448 | 0.433 | 0.62 | 0.44 | 0.19 |
+| fixed excerpts | 0.568 | 0.558 | 0.63 | 0.56 | 0.07 |
+
+The searches find the same facts; the model opens and curates far more of them. The old-excerpt row reproduces SkyRL's
+eval of this checkpoint (0.448), so the two eval paths agree.
+
+### Training run
+
+Setup: as the previous run (format penalty 0.1, Jasper's harness rules, F4), with the fixed excerpts. Run
+`snippetfix_fp_harness`, launched by `RUN_NAME=snippetfix_fp_harness bash search_agent/train.sh
+search.format_penalty=0.1`; about 11 hours.
+
+Eval, mean over the 128 eval rollouts. Base model (step 0): F1 0.357, reward 0.156 with fixed excerpts; F1 0.271,
+reward 0.044 with the old ones.
+
+| Run | step 8: F1, reward | step 16: F1, reward | step 24: F1, reward |
+|---|---|---|---|
+| `full_lr3e-6` (plain F4, old harness) | 0.251, 0.213 | 0.368, 0.350 | 0.438, 0.424 |
+| `base_format_base_fp_harness` (format penalty, Jasper's harness rules) | 0.284, 0.230 | 0.385, 0.345 | 0.448, 0.430 |
+| `snippetfix_fp_harness` (+ excerpt fix) | 0.462, 0.411 | 0.555, 0.550 | **0.558, 0.551** |
+
+Eval at step 24 (columns as in the previous section; context full: ran out of context, scored):
+
+| Run | precision | recall | `finish` | plain reply | invalid JSON | context full | nothing curated | turns |
+|---|---|---|---|---|---|---|---|---|
+| `base_format_base_fp_harness` | 0.487 | 0.433 | 0.98 | 0.00 | 0.02 | 0.00 | 0.02 | 18.7 |
+| `snippetfix_fp_harness` | 0.545 | 0.589 | 0.01 | 0.80 | 0.06 | 0.12 | 0.16 | 20.0 |
+
+Conclusions:
+
+- The excerpt fix is the largest single gain so far: +0.11 F1 and +0.12 reward over the previous run at step 24, about
+  twice the eval noise (0.047), and +0.17 at steps 8 and 16. It lifts the untrained model too (F1 0.271 → 0.357).
+- Training with fixed excerpts did not beat evaluating with them: 0.558 against 0.568 for the previous checkpoint
+  with fixed excerpts, within noise. It got there sooner: 0.555 by step 16, then flat.
+- The model stopped calling `finish` and ends with a plain reply instead, usually stating the question's answer after
+  curating (training: 0.06 at step 1, over 0.9 by step 13). A plain reply scores the same as `finish`, so nothing
+  pushes back. A likely cause: with the old excerpts, plain replies mostly meant giving up and scored well below
+  `finish` (−0.47 on the same query at step 0); with good excerpts they did not (−0.06), so GRPO barely pushed against
+  them. This rests on 5 queries per run.
+- New failure: 16% of step-24 eval episodes curated nothing (previous run 2%), all of them out of context (13) or
+  invalid JSON (8). The model curates in one call at the end, so an episode that runs out of context first ends with
+  nothing.
+- One run, one seed.
