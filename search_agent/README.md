@@ -84,7 +84,10 @@ RUN_NAME=<name> bash search_agent/train.sh
 ```
 
 Add `search.format_penalty=0.1` to subtract 0.1 from a training trajectory's reward when any of its tool calls has an
-off-form Harmony header, as in Jasper's format-penalty run (off by default; eval rewards stay plain F4).
+off-form Harmony header, as in Jasper's format-penalty run. Add `search.discovery_bonus=0.2
+search.curated_chunk_cost=0.02` for his f4s reward: F4 + 0.2 x trajectory recall (the share of facts with a gold
+chunk anywhere in the search results) - 0.02 per curated chunk. All three are off by default; eval rewards stay plain
+F4.
 
 Checkpoints go to `outputs/search_agent/checkpoints/<name>`, eval dumps to `outputs/search_agent/exports/<name>`,
 TensorBoard logs to `outputs/search_agent/logs/tensorboard/<name>`:

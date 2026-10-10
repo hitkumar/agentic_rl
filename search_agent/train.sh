@@ -28,6 +28,10 @@
 # search.format_penalty=0.1 turns on Jasper's format penalty: a training trajectory with any off-form tool-call
 # header gets reward - 0.1 (default 0, off; eval rewards stay plain F4). train.py handles it, not SkyRL, e.g.
 #   RUN_NAME=f4_fmt bash search_agent/train.sh search.format_penalty=0.1
+# search.discovery_bonus=0.2 search.curated_chunk_cost=0.02 add Jasper's f4s shaping to the training reward:
+# F4 + 0.2 x trajectory recall - 0.02 per curated chunk (both default 0, off), e.g. with the format penalty:
+#   RUN_NAME=f4s_fmt bash search_agent/train.sh search.format_penalty=0.1 search.discovery_bonus=0.2 \
+#     search.curated_chunk_cost=0.02
 #
 # A Hugging Face copy of the model (servable with vllm serve, for evals with trajectory.py) is saved at the end of
 # each epoch and of training, under outputs/search_agent/exports/<run>/global_step_<N>/policy. SkyRL saves it at every

@@ -11,7 +11,14 @@ run_trajectory), so evals can search a different corpus than training.
 
 With format_penalty p > 0, a training trajectory with any off-form tool-call header gets reward - p, once per
 trajectory, as in Jasper's format-penalty run; not on the flat -0.2 of an unusable turn (BROKEN_TURN_ENDINGS), as
-his harness skips the reward there. Eval rewards stay plain F4, so they compare across runs.
+his harness skips the reward there.
+
+discovery_bonus b and curated_chunk_cost c shape a training trajectory's F4 as in Jasper's f4s reward (b = 0.2,
+c = 0.02): F4 + b * trajectory recall - c * curated chunks. Trajectory recall is the share of facts with a gold chunk
+anywhere in the search results, curated or not; the chunk cost holds back curating everything seen. Neither applies
+to the flat -0.2 of an empty curated set or an unusable turn, as in his RetrievalReward.
+
+Eval rewards stay plain F4, so they compare across runs.
 """
 
 import asyncio
@@ -69,11 +76,18 @@ class EngineSampler:
 
 class SearchGenerator(GeneratorInterface):
     def __init__(
-        self, inference_engine_client: InferenceEngineInterface, context_length: int, format_penalty: float = 0.0
+        self,
+        inference_engine_client: InferenceEngineInterface,
+        context_length: int,
+        format_penalty: float = 0.0,
+        discovery_bonus: float = 0.0,
+        curated_chunk_cost: float = 0.0,
     ):
         self.client = inference_engine_client
         self.context_length = context_length
         self.format_penalty = format_penalty
+        self.discovery_bonus = discovery_bonus
+        self.curated_chunk_cost = curated_chunk_cost
         self.tools = tool_pool()
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
@@ -101,12 +115,23 @@ class SearchGenerator(GeneratorInterface):
         )
 
         responses = [t.response_ids for t in trajectories]
-        metadata = input_batch["batch_metadata"]
-        penalty = self.format_penalty if metadata is not None and metadata.training_phase == "train" else 0.0
-        rewards = [
-            t.reward - penalty * (t.off_format_calls > 0 and t.stop_reason not in BROKEN_TURN_ENDINGS)
-            for t in trajectories
+        # Trajectory recall (Jasper's candidate recall): the recall of every chunk the searches returned, curated or not.
+        trajectory_recalls = [
+            score(list(t.session.seen_ids), json.loads(e["facts"]), beta=1.0).recall
+            for t, e in zip(trajectories, env_extras)
         ]
+        metadata = input_batch["batch_metadata"]
+        training = metadata is not None and metadata.training_phase == "train"
+        rewards = []
+        for t, trajectory_recall in zip(trajectories, trajectory_recalls):
+            reward = t.reward
+            if training and t.stop_reason not in BROKEN_TURN_ENDINGS:
+                if t.session.curated_ids:
+                    reward += self.discovery_bonus * trajectory_recall
+                    reward -= self.curated_chunk_cost * len(t.session.curated_ids)
+                if t.off_format_calls > 0:
+                    reward -= self.format_penalty
+            rewards.append(reward)
         loss_masks = [t.loss_mask for t in trajectories]
         metrics = get_rollout_metrics(responses, rewards, loss_masks=loss_masks)
         scores = [
@@ -115,11 +140,7 @@ class SearchGenerator(GeneratorInterface):
         metrics["search/f1"] = sum(s.f_beta for s in scores) / len(scores)
         metrics["search/precision"] = sum(s.precision for s in scores) / len(scores)
         metrics["search/recall"] = sum(s.recall for s in scores) / len(scores)
-        # Trajectory recall (Jasper's candidate recall): the recall of every chunk the searches returned, curated or not.
-        metrics["search/trajectory_recall"] = sum(
-            score(list(t.session.seen_ids), json.loads(e["facts"]), beta=1.0).recall
-            for t, e in zip(trajectories, env_extras)
-        ) / len(trajectories)
+        metrics["search/trajectory_recall"] = sum(trajectory_recalls) / len(trajectories)
         metrics["search/turns"] = sum(t.turns for t in trajectories) / len(trajectories)
         metrics["search/nothing_curated"] = sum(not t.session.curated_ids for t in trajectories) / len(trajectories)
         # Format drift: share of tool-call headers not in the canonical form, share of trajectories with any, and failed

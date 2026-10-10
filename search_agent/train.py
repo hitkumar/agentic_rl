@@ -4,8 +4,10 @@ SkyRL's standard PPO entrypoint, with SearchGenerator in place of its SkyRL-Gym 
 SkyRL's (key=value on the command line). generator.max_input_length is the context length, the cap on prompt plus
 responses.
 
-One override is ours, not SkyRL's: search.format_penalty=<p> subtracts p from a training trajectory's reward if any
-of its tool calls has an off-form header, as in Jasper's format-penalty run (p = 0.1). Default 0, off.
+Three overrides are ours, not SkyRL's, all training-reward shaping (see generator.py), default 0 (off):
+  search.format_penalty=<p>       subtract p if any tool call has an off-form header (Jasper's format-penalty run: 0.1)
+  search.discovery_bonus=<b>      add b x trajectory recall (Jasper's f4s: 0.2)
+  search.curated_chunk_cost=<c>   subtract c per curated chunk (Jasper's f4s: 0.02)
 """
 
 import os
@@ -18,34 +20,35 @@ from skyrl.train.utils import initialize_ray
 
 from search_agent.generator import SearchGenerator
 
-FORMAT_PENALTY_ARG = "search.format_penalty="
+SEARCH_ARGS = ("format_penalty", "discovery_bonus", "curated_chunk_cost")
 
 
 class SearchExp(BasePPOExp):
-    def __init__(self, cfg: SkyRLTrainConfig, format_penalty: float):
-        self.format_penalty = format_penalty
+    def __init__(self, cfg: SkyRLTrainConfig, search_args: dict[str, float]):
+        self.search_args = search_args
         super().__init__(cfg)
 
     def get_generator(self, cfg, tokenizer, inference_engine_client):
         return SearchGenerator(
-            inference_engine_client, context_length=cfg.generator.max_input_length, format_penalty=self.format_penalty
+            inference_engine_client, context_length=cfg.generator.max_input_length, **self.search_args
         )
 
 
 @ray.remote(num_cpus=1)
-def skyrl_entrypoint(cfg: SkyRLTrainConfig, format_penalty: float) -> None:
+def skyrl_entrypoint(cfg: SkyRLTrainConfig, search_args: dict[str, float]) -> None:
     # SkyRL's TensorBoard logger writes to $TENSORBOARD_DIR, relative to this process's working directory by default.
     os.environ.setdefault("TENSORBOARD_DIR", os.path.join(cfg.trainer.log_path, "tensorboard", cfg.trainer.run_name))
-    SearchExp(cfg, format_penalty).run()
+    SearchExp(cfg, search_args).run()
 
 
 def main() -> None:
     # SkyRL rejects config keys it doesn't know, so take ours out first.
-    format_penalty = 0.0
+    search_args = {}
     overrides = []
     for arg in sys.argv[1:]:
-        if arg.startswith(FORMAT_PENALTY_ARG):
-            format_penalty = float(arg.removeprefix(FORMAT_PENALTY_ARG))
+        key, _, value = arg.partition("=")
+        if key.startswith("search.") and key.removeprefix("search.") in SEARCH_ARGS:
+            search_args[key.removeprefix("search.")] = float(value)
         else:
             overrides.append(arg)
     cfg = SkyRLTrainConfig.from_cli_overrides(overrides)
@@ -63,7 +66,7 @@ def main() -> None:
 
     ray.init = init_with_setup_hook
     initialize_ray(cfg)
-    ray.get(skyrl_entrypoint.remote(cfg, format_penalty))
+    ray.get(skyrl_entrypoint.remote(cfg, search_args))
 
 
 if __name__ == "__main__":
