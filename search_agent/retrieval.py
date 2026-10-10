@@ -33,6 +33,10 @@ GREP_CANDIDATES = 5_000
 # Seconds a regex may spend on one chunk, and on the whole grep, so a pathological pattern cannot hang an episode.
 GREP_TIMEOUT = 0.05
 GREP_TOTAL_TIMEOUT = 2.0
+# Query words that don't place a bm25_search snippet: they occur near the start of almost every chunk.
+SNIPPET_STOPWORDS = frozenset(
+    "a an and are as at be by for from has have in is it its of on or that the this to was were with which who".split()
+)
 
 
 def tokenize(text: str) -> list[str]:
@@ -74,8 +78,7 @@ class Index:
         hits = []
         for chunk_id in self._rank(match, k):
             title, body = split_header(self._text(chunk_id))
-            positions = [p for p in (body.lower().find(token) for token in tokens) if p >= 0]
-            hits.append({"chunk_id": chunk_id, "title": title, "snippet": window(body, min(positions, default=0))})
+            hits.append({"chunk_id": chunk_id, "title": title, "snippet": window(body, snippet_start(body, tokens))})
         return hits
 
     def grep_corpus(self, pattern: str, k: int = 10, case_sensitive: bool = False) -> list[dict]:
@@ -134,6 +137,26 @@ def split_header(text: str) -> tuple[str, str]:
     header, _, body = text.partition("\n---\n")
     title = " · ".join(line.split(": ", 1)[1] for line in header.splitlines() if ": " in line)
     return title, body
+
+
+def snippet_start(body: str, tokens: list[str]) -> int:
+    """Where to place a bm25_search snippet: the query-word match whose window has the most distinct query words.
+
+    Words match whole, stopwords excluded. Jasper's harness (and ours before) placed it at the earliest substring
+    match of any query word, which is usually a word like "and" near the chunk's start, so the snippet showed the
+    chunk's opening rather than the part that matched.
+    """
+    lowered = body.lower()
+    words = [token for token in dict.fromkeys(tokens) if token not in SNIPPET_STOPWORDS]
+    matches = sorted((m.start(), word) for word in words for m in re.finditer(rf"\b{re.escape(word)}\b", lowered))
+    best_start, best_count = 0, 0
+    for start, _ in matches:
+        # The span window(body, start) shows.
+        begin = max(0, min(start - SNIPPET_CHARS // 3, len(body) - SNIPPET_CHARS))
+        count = len({word for p, word in matches if begin <= p and p + len(word) <= begin + SNIPPET_CHARS})
+        if count > best_count:
+            best_start, best_count = start, count
+    return best_start
 
 
 def window(text: str, start: int) -> str:
