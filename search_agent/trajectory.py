@@ -14,6 +14,10 @@ curated set is scored. As in Jasper's harness, a turn the harness cannot use end
 (-0.2) instead, curated set unscored: a tool call whose arguments are not valid JSON (e.g. finish with {""}), or a
 reply cut off at MAX_GENERATION_TOKENS. Unknown argument keys are dropped, as his tool validation does.
 
+For training only, run_trajectory's context_nudge f > 0 adds a notice to the first tool result after which at most f
+of the context is left, asking the model to curate and finish, as in Mercor's context nudge (they used f = 0.2).
+Evals never use it; this script's evals run without it.
+
 Run the dev queries against a vLLM server (see search_agent/README.md to start one):
   uv run python -u -m search_agent.trajectory --limit 8
 
@@ -66,6 +70,10 @@ TOOL_NAMES = {spec["name"] for spec in TOOL_SPECS}
 TOOL_PARAMETERS = {spec["name"]: set(spec["parameters"]["properties"]) for spec in TOOL_SPECS}
 # Stop reasons for turns the harness cannot use; the episode scores a flat EMPTY_REWARD (see the module docstring).
 BROKEN_TURN_ENDINGS = ("invalid_json", "truncated")
+CONTEXT_NUDGE = (
+    "Your context is almost full. Curate the relevant documents you have found now with the curate tool, "
+    "then call finish."
+)
 
 ENCODING = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 # <|call|> ends a tool call, <|return|> a final answer.
@@ -134,6 +142,8 @@ class Trajectory:
     # Executed tool calls whose observation is an error, and those of them to finish.
     failed_tool_calls: int = 0
     failed_finish_calls: int = 0
+    # Whether a tool result carried the context nudge.
+    nudged: bool = False
 
 
 def render_prompt(query: str) -> list[int]:
@@ -184,6 +194,16 @@ def run_tool(tools: SearchTools, recipient: str, arguments: str) -> dict:
         return {"error": f"Bad arguments for {name}: {exc}"}
 
 
+def render_tool_result(recipient: str, observation: dict) -> list[int]:
+    """A tool result as a Harmony tool message, followed by the start of the next assistant turn."""
+    message = (
+        Message.from_author_and_content(Author.new(Role.TOOL, recipient), json.dumps(observation, ensure_ascii=False))
+        .with_recipient("assistant")
+        .with_channel("commentary")
+    )
+    return ENCODING.render(message) + ASSISTANT_START
+
+
 async def run_trajectory(
     sampler: Sampler,
     tools: Executor,
@@ -191,10 +211,13 @@ async def run_trajectory(
     facts: list[dict],
     context_length: int = CONTEXT_LENGTH,
     corpus: str = "",
+    context_nudge: float = 0.0,
 ) -> Trajectory:
     """Runs the tool calls in tools, a tool_pool, against the index in DATA_DIR / corpus.
 
-    corpus "" is DATA_DIR itself; e.g. "sec_256" is the 256-query ablation set's smaller corpus.
+    corpus "" is DATA_DIR itself; e.g. "sec_256" is the 256-query ablation set's smaller corpus. context_nudge, for
+    training only, is the share of the context left at which a tool result tells the model to wrap up (0, off; see the
+    module docstring).
     """
     trajectory = Trajectory(prompt_ids=render_prompt(query))
     loop = asyncio.get_running_loop()
@@ -243,14 +266,12 @@ async def run_trajectory(
         if trajectory.session.finished:
             trajectory.stop_reason = "finish"
             break
-        tool_message = (
-            Message.from_author_and_content(
-                Author.new(Role.TOOL, recipient), json.dumps(observation, ensure_ascii=False)
-            )
-            .with_recipient("assistant")
-            .with_channel("commentary")
-        )
-        tool_ids = ENCODING.render(tool_message) + ASSISTANT_START
+        tool_ids = render_tool_result(recipient, observation)
+        left = context_length - len(trajectory.prompt_ids) - len(trajectory.response_ids) - len(tool_ids)
+        if context_nudge > 0 and not trajectory.nudged and left <= context_nudge * context_length:
+            trajectory.nudged = True
+            observation["notice"] = CONTEXT_NUDGE
+            tool_ids = render_tool_result(recipient, observation)
         trajectory.response_ids += tool_ids
         trajectory.loss_mask += [0] * len(tool_ids)
         trajectory.logprobs += [0.0] * len(tool_ids)

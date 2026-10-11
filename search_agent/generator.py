@@ -18,6 +18,9 @@ c = 0.02): F4 + b * trajectory recall - c * curated chunks. Trajectory recall is
 anywhere in the search results, curated or not; the chunk cost holds back curating everything seen. Neither applies
 to the flat -0.2 of an empty curated set or an unusable turn, as in his RetrievalReward.
 
+context_nudge f > 0 adds Mercor's context nudge to training trajectories only: a notice to wrap up once at most f of
+the context is left (see run_trajectory). Evals during training run without it.
+
 Eval rewards stay plain F4, so they compare across runs.
 """
 
@@ -82,12 +85,14 @@ class SearchGenerator(GeneratorInterface):
         format_penalty: float = 0.0,
         discovery_bonus: float = 0.0,
         curated_chunk_cost: float = 0.0,
+        context_nudge: float = 0.0,
     ):
         self.client = inference_engine_client
         self.context_length = context_length
         self.format_penalty = format_penalty
         self.discovery_bonus = discovery_bonus
         self.curated_chunk_cost = curated_chunk_cost
+        self.context_nudge = context_nudge
         self.tools = tool_pool()
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
@@ -95,6 +100,8 @@ class SearchGenerator(GeneratorInterface):
         trajectory_ids = input_batch["trajectory_ids"]
         assert env_extras is not None and trajectory_ids is not None
         sampling_params = input_batch["sampling_params"] or {}
+        metadata = input_batch["batch_metadata"]
+        training = metadata is not None and metadata.training_phase == "train"
 
         async def run(extras: dict, session_id: str) -> Trajectory:
             sampler = EngineSampler(self.client, sampling_params, session_id)
@@ -106,6 +113,7 @@ class SearchGenerator(GeneratorInterface):
                     json.loads(extras["facts"]),
                     self.context_length,
                     extras.get("corpus") or "",
+                    self.context_nudge if training else 0.0,
                 )
             finally:
                 await self.client.finish_session(session_id)
@@ -120,8 +128,6 @@ class SearchGenerator(GeneratorInterface):
             score(list(t.session.seen_ids), json.loads(e["facts"]), beta=1.0).recall
             for t, e in zip(trajectories, env_extras)
         ]
-        metadata = input_batch["batch_metadata"]
-        training = metadata is not None and metadata.training_phase == "train"
         rewards = []
         for t, trajectory_recall in zip(trajectories, trajectory_recalls):
             reward = t.reward
@@ -141,6 +147,7 @@ class SearchGenerator(GeneratorInterface):
         metrics["search/precision"] = sum(s.precision for s in scores) / len(scores)
         metrics["search/recall"] = sum(s.recall for s in scores) / len(scores)
         metrics["search/trajectory_recall"] = sum(trajectory_recalls) / len(trajectories)
+        metrics["search/nudged"] = sum(t.nudged for t in trajectories) / len(trajectories)
         metrics["search/turns"] = sum(t.turns for t in trajectories) / len(trajectories)
         metrics["search/nothing_curated"] = sum(not t.session.curated_ids for t in trajectories) / len(trajectories)
         # Format drift: share of tool-call headers not in the canonical form, share of trajectories with any, and failed

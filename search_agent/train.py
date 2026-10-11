@@ -4,10 +4,11 @@ SkyRL's standard PPO entrypoint, with SearchGenerator in place of its SkyRL-Gym 
 SkyRL's (key=value on the command line). generator.max_input_length is the context length, the cap on prompt plus
 responses.
 
-Three overrides are ours, not SkyRL's, all training-reward shaping (see generator.py), default 0 (off):
+Four overrides are ours, not SkyRL's, all training-only (see generator.py), default 0 (off):
   search.format_penalty=<p>       subtract p if any tool call has an off-form header (Jasper's format-penalty run: 0.1)
   search.discovery_bonus=<b>      add b x trajectory recall (Jasper's f4s: 0.2)
   search.curated_chunk_cost=<c>   subtract c per curated chunk (Jasper's f4s: 0.02)
+  search.context_nudge=<f>        tell the model to wrap up once at most f of the context is left (Mercor: 0.2)
 """
 
 import os
@@ -20,7 +21,7 @@ from skyrl.train.utils import initialize_ray
 
 from search_agent.generator import SearchGenerator
 
-SEARCH_ARGS = ("format_penalty", "discovery_bonus", "curated_chunk_cost")
+SEARCH_ARGS = ("format_penalty", "discovery_bonus", "curated_chunk_cost", "context_nudge")
 
 
 class SearchExp(BasePPOExp):
