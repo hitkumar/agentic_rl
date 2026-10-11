@@ -346,6 +346,24 @@ Conclusions:
   nothing.
 - One run, one seed.
 
+## Context nudge, eval-only test
+
+TLDR: telling the model to wrap up when the context is nearly full does not help in eval; the model ignores the notice.
+Not used in evals since; it remains a training-only option (`search.context_nudge`), not yet run.
+
+Setup: `snippetfix_fp_harness`'s step-24 checkpoint, 32 eval queries x 4 samples through `trajectory.py`, as in
+Mercor's context nudge: once at most 20% (or 10%) of the context is left, the next tool result carries a notice to
+curate and call `finish`. Run with an eval option since removed. Rollouts: `search_agent/data/rollouts/nudge{0,10,20}_step24_eval32_x4.jsonl`.
+
+| Nudge | F1 | reward | ran out of context | curated nothing |
+|---|---|---|---|---|
+| none | 0.574 | 0.576 | 17 | 19 |
+| at 10% left | 0.555 | 0.543 | 21 | 24 |
+| at 20% left | 0.594 | 0.588 | 15 | 20 |
+
+Episode counts out of 128. All three are within eval noise. Episodes stuck in a search loop kept searching after the
+notice; a model not trained with it has no reason to follow it.
+
 ## Discovery bonus and chunk cost (Jasper's f4s reward)
 
 TLDR: adding Jasper's f4s shaping to the training reward ends level with the excerpt-fix run: held-out F1 0.570 vs
