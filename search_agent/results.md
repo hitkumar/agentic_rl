@@ -345,3 +345,62 @@ Conclusions:
   invalid JSON (8). The model curates in one call at the end, so an episode that runs out of context first ends with
   nothing.
 - One run, one seed.
+
+## Discovery bonus and chunk cost (Jasper's f4s reward)
+
+TLDR: adding Jasper's f4s shaping to the training reward ends level with the excerpt-fix run: held-out F1 0.570 vs
+0.558 and reward 0.567 vs 0.551 at step 24, within eval noise. It cut failed eval episodes at step 24 (curated
+nothing: 3% vs 16%) but did not make the model find more facts. Training dumps show where facts are lost: by the end,
+43% of facts never appear in any search result, against 13% found but not curated. Search, not curation, is now the
+bottleneck.
+
+Setup: as `snippetfix_fp_harness`, with the training reward F4 + 0.2 x trajectory recall - 0.02 per curated chunk
+(trajectory recall: share of facts with a gold chunk anywhere in the search results, curated or not). Eval rewards
+stay plain F4. Training batches were dumped every step (`trainer.dump_data_batch=true`). Run
+`snippetfix_f4s_fp_harness_v2`, launched by `RUN_NAME=snippetfix_f4s_fp_harness_v2 bash search_agent/train.sh
+search.format_penalty=0.1 search.discovery_bonus=0.2 search.curated_chunk_cost=0.02 trainer.dump_data_batch=true`;
+about 11 hours. (A first attempt under the name without `_v2` was killed at step 7 and restarted from scratch.)
+
+Eval, mean over the 128 eval rollouts. Base model (step 0): F1 0.334, reward 0.124.
+
+| Run | step 8: F1, reward | step 16: F1, reward | step 24: F1, reward |
+|---|---|---|---|
+| `snippetfix_fp_harness` (F4) | 0.462, 0.411 | 0.555, 0.550 | 0.558, 0.551 |
+| `snippetfix_f4s_fp_harness_v2` (F4 + discovery bonus - chunk cost) | 0.461, 0.397 | 0.508, 0.483 | **0.570, 0.567** |
+
+Eval at step 24, share of episodes that ran out of context (scored on what was curated) and that curated nothing
+(-0.2):
+
+| Run | ran out of context | curated nothing |
+|---|---|---|
+| `snippetfix_fp_harness` | 0.13 | 0.16 |
+| `snippetfix_f4s_fp_harness_v2` | 0.04 | 0.03 |
+
+Where facts are lost during training, as a share of each step's facts (each step is a different batch of 64
+queries). Found: a gold chunk appeared in a search result; curated: one was in the final curated set.
+
+| Step | 1 | 4 | 8 | 12 | 16 | 20 | 24 |
+|---|---|---|---|---|---|---|---|
+| found | 0.47 | 0.47 | 0.45 | 0.51 | 0.48 | 0.58 | 0.57 |
+| curated | 0.22 | 0.25 | 0.30 | 0.37 | 0.37 | 0.46 | 0.44 |
+| never found | 0.53 | 0.53 | 0.55 | 0.49 | 0.53 | 0.42 | 0.43 |
+| found, not curated | 0.25 | 0.22 | 0.15 | 0.14 | 0.10 | 0.13 | 0.13 |
+
+Conclusions:
+
+- The shaping does not raise held-out F1: level at step 8, behind at step 16 (-0.047, at eval noise), level at step 24.
+- It reduced failed episodes at the end: in training, episodes running out of context peaked at 0.13 (step 23)
+  against 0.18 for `snippetfix_fp_harness`, and the step-24 eval has far fewer empty curated sets. The late rise in
+  running out of context still happens, just less.
+- The discovery bonus did not increase discovery: trajectory recall in training stayed level with or below
+  `snippetfix_fp_harness` throughout (0.57 vs 0.64 at step 24).
+- Curation was learned: facts found but not curated fell from 0.25 to 0.13, mostly chunks that appeared in results
+  but were never opened. Search barely improved: never-found facts went from 0.53 to 0.43, flat since about step 12.
+- Of the facts in steps 17-24, 18% were found by none of a query's 8 episodes, 55% by some and 26% by all. GRPO can
+  only reinforce searches that sometimes succeed, so the 18% need better search ability, not more of the same
+  training. BM25 can find nearly all of them (searching a fact's own sentence puts its chunk in the top 25 for 117 of
+  130 eval facts); the model's queries miss because the questions paraphrase their clues.
+- Options for the search gap: more rollouts per query (16) so rare successes appear, a semantic search tool alongside
+  BM25 for paraphrased clues (not comparable with Jasper's lexical harness), or teaching search queries from a
+  stronger model before RL.
+- One run, one seed.
