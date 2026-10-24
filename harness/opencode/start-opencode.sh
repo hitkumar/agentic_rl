@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+# TODO: update before running. The script moved from the repo root to harness/opencode/, so this now opens
+# harness/opencode/ as the workspace instead of the repo root. The config lookup below still needs this directory.
 OPENCODE_WORKSPACE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 OPENCODE_LOCAL_CONFIG="$OPENCODE_WORKSPACE/opencode-local.json"
 OPENCODE_LOCAL_API_URL="http://127.0.0.1:8000/v1"

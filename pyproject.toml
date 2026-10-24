@@ -10,9 +10,6 @@ dependencies = [
     "regex>=2026.9.29",
 ]
 
-[project.scripts]
-atif-to-hf-trace = "agentic_rl.atif_to_hf:main"
-
 [dependency-groups]
 dev = [
     "ipykernel>=7.4.0",
@@ -26,13 +23,6 @@ train = [
     "openai-harmony>=0.0.8",
     "skyrl[fsdp]",
 ]
-
-[build-system]
-requires = ["hatchling>=1.27"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/agentic_rl"]
 
 # skyrl comes from a checkout of its v0.3.0 release (f5bc3b78), not PyPI: uv only reads [tool.uv] settings from the
 # root project, so skyrl's indexes and overrides for its CUDA wheels are mirrored below (fsdp extra only, x86_64).
@@ -95,7 +85,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 # skyrl's editable install is an import hook, which type checkers can't follow; point them at its checkout.
 [tool.pyrefly]
-search-path = [".", "src", "/home/htkumar/oss/SkyRL-v0.3.0"]
+search-path = [".", "/home/htkumar/oss/SkyRL-v0.3.0"]
 
 [tool.pyright]
-extraPaths = [".", "src", "/home/htkumar/oss/SkyRL-v0.3.0"]
+extraPaths = [".", "/home/htkumar/oss/SkyRL-v0.3.0"]

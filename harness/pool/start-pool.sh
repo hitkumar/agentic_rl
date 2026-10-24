@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+# TODO: update before running. The script moved from the repo root to harness/pool/, so this now opens
+# harness/pool/ as the workspace instead of the repo root.
 POOL_WORKSPACE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 POOL_API_URL="http://127.0.0.1:8000/v1"
 

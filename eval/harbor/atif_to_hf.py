@@ -114,7 +114,7 @@ def convert_atif(
         if not isinstance(step, dict):
             continue
         source = step.get("source")
-        role = role_by_source.get(source)
+        role = role_by_source.get(source) if isinstance(source, str) else None
         if role is None:
             raise ValueError(f"unsupported ATIF step source: {source!r}")
 

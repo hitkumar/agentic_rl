@@ -8,12 +8,13 @@ Experiments and training infrastructure for agentic reinforcement learning.
   reproducing Jasper Lu's [Training search agents with GRPO](https://jasperlu.com/blog/training-search-agents-grpo/)
   with full fine-tuning in SkyRL on 8x A100. Results in [search_agent/results.md](search_agent/results.md).
 - [Harbor](#harbor): agent benchmarks in task containers, with notes from the DGX Spark setup in
-  [harbor.md](harbor.md), and an exporter from Harbor trajectories to Hugging Face traces.
+  [eval/harbor/harbor.md](eval/harbor/harbor.md), and an exporter from Harbor trajectories to Hugging Face traces.
 
 ## Python environment
 
 This project follows [Prime-RL's environment pattern](https://github.com/PrimeIntellect-ai/prime-rl/blob/main/pyproject.toml):
-Python 3.12, uv dependency management, and an editable package under `src/`.
+Python 3.12 and uv dependency management. The project is not an installable package: code lives in top-level
+folders (`search_agent/`, `eval/`) and runs from the project root.
 Dependencies come in two groups besides the base set: `dev` (pytest, Ruff, pandas, ipykernel), installed by default,
 and `train` (SkyRL, vLLM, openai-harmony), used by `search_agent/` for its evals and training.
 
@@ -23,11 +24,10 @@ these commands from the project root:
 ```bash
 uv sync --locked
 uv run python -V
-uv run python -c "import agentic_rl; print(agentic_rl.__file__)"
 ```
 
 `uv sync --locked` creates `.venv` and installs the versions recorded in `uv.lock`,
-including the development tools and this package in editable mode. It reports an
+including the development tools. It reports an
 error if the lockfile and project requirements disagree.
 
 Use `uv run` to run commands inside the environment. For an interactive shell,
@@ -96,7 +96,7 @@ Convert Harbor's ATIF `trajectory.json` into the JSONL format used by the
 [Hugging Face Agent Traces viewer](https://huggingface.co/docs/hub/agent-traces):
 
 ```bash
-uv run atif-to-hf-trace jobs/<job>/<trial>/agent/trajectory.json
+uv run python eval/harbor/atif_to_hf.py jobs/<job>/<trial>/agent/trajectory.json
 ```
 
 The default output is `trajectory.hf.jsonl` beside the input file. Upload that

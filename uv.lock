@@ -59,7 +59,7 @@ wheels = [
 [[package]]
 name = "agentic-rl"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "huggingface-hub", marker = "sys_platform == 'linux'" },
     { name = "pyarrow", marker = "sys_platform == 'linux'" },
