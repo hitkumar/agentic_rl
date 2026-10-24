@@ -148,3 +148,20 @@ Open questions:
 - **Sandbox:** an isolated, disposable environment where the agent runs one trial. It keeps the agent's actions from affecting anything outside, and gives every trial the same clean starting state.
 - **Eval harness vs. agent harness:** the eval harness (Harbor) starts a container per trial, runs the agent, then runs the graders. The agent harness (Claude Code, Codex) is the system under test, so you always measure model + agent harness together.
 - Harbor is introduced which is the eval platform.
+
+# Harness / Agentic Engineering
+
+## Jediah Katz (Cursor, now SpaceXAI): Is the Agent Harness Dead? (AI Engineer talk)
+
+[Talk](https://www.youtube.com/watch?v=7Y4sbZgBdnc)
+
+- Very interesting perspective on harnesses. Coding harnesses might be dead, because models have learned a lot of what
+  the harness used to cover for (exploring the codebase, checking your work, etc.).
+- This happens through a **data flywheel**: the harness brings harder tasks within reach → more people do them with
+  agents → that data trains the next model → the model learns the skill natively and the harness can drop it.
+- Harnesses in general are not dead though:
+  1. They let the model do tasks the current model can't do on its own, kind of like hacks but still very important.
+     This opens the next frontier and restarts the flywheel.
+  2. They matter for security and cost. Cost comes from caching, token efficiency and orchestrating across multiple
+     models. Harness choice barely changed scores in the studies he cited, but cost per task differed a lot.
+- The cycle: build a harness, and once the model catches up, delete it, like what's happening with coding these days.
