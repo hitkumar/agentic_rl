@@ -1,0 +1,45 @@
+[project]
+name = "tau-bench-eval"
+version = "0.1.0"
+description = "Local τ-bench runs: vLLM serving for the agent and user-simulator models."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "vllm==0.32.0",
+    # Prebuilt FlashInfer kernels for vllm 0.32.0's flashinfer-python 0.7.0.post1. Without them FlashInfer compiles its
+    # sampling kernels at server startup, which fails here: neither system CUDA toolkit has the runtime headers.
+    "flashinfer-jit-cache==0.7.0.post1",
+    # Listed directly so that [tool.uv.sources] can point it at FlashInfer's index (sources only apply to direct
+    # dependencies); see the dependency-metadata override below.
+    "flashinfer-jit-cache-sm80==0.7.0.post1",
+    "flashinfer-cubin==0.7.0.post1",
+]
+
+# A separate project from the repo root, whose environment pins vllm 0.23.0 for SkyRL training; Muse Glimmer needs
+# vllm >= 0.28.0. vllm 0.32.0's PyPI wheel uses torch 2.13 and CUDA 13 (this host's driver supports CUDA 13.0).
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# Only use uv-managed Python builds: a non-standard system Python can ship its own glibc and loader, under which
+# vLLM's CUDA extension cannot resolve cuBLAS symbols.
+python-preference = "only-managed"
+
+# flashinfer-jit-cache is a small shim through which FlashInfer finds the prebuilt kernels, which ship as one package
+# per GPU architecture; the shim requires all six. This host's A100s need only sm80.
+[[tool.uv.dependency-metadata]]
+name = "flashinfer-jit-cache"
+version = "0.7.0.post1+cu130"
+requires-dist = ["flashinfer-jit-cache-sm80==0.7.0.post1+cu130"]
+
+[[tool.uv.index]]
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "flashinfer"
+url = "https://flashinfer.ai/whl"
+explicit = true
+
+[tool.uv.sources]
+flashinfer-jit-cache = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm80 = { index = "flashinfer-cu130" }
+flashinfer-cubin = { index = "flashinfer" }
