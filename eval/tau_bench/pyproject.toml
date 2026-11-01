@@ -12,6 +12,13 @@ dependencies = [
     # dependencies); see the dependency-metadata override below.
     "flashinfer-jit-cache-sm80==0.7.0.post1",
     "flashinfer-cubin==0.7.0.post1",
+    # Parses tool docstrings into the schemas the agent sees (eval/tau_bench/tool.py), as tau2-bench does.
+    "docstring-parser>=0.17",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4",
 ]
 
 # A separate project from the repo root, whose environment pins vllm 0.23.0 for SkyRL training; Muse Glimmer needs
